@@ -1,0 +1,43 @@
+{
+  "elements": [
+    {
+      "type": "SelectInstance",
+      "name": "MQTTInstance",
+      "caption": "MQTT Server",
+      "validModules": [
+        "{C6D2AEB3-6E1F-4B2E-8E69-3A1A00246850}"
+      ]
+    },
+    {
+      "type": "NumberSpinner",
+      "name": "ScaleCount",
+      "caption": "Anzahl Waagen"
+    },
+    {
+      "type": "Select",
+      "name": "Scale1Type",
+      "caption": "Waage 1",
+      "options": [
+        { "caption": "Chlor", "value": "Chlor" },
+        { "caption": "pH Minus", "value": "pH Minus" },
+        { "caption": "pH Plus", "value": "pH Plus" },
+        { "caption": "Flockungsmittel", "value": "Flockungsmittel" },
+        { "caption": "Aktivsauerstoff", "value": "Aktivsauerstoff" },
+        { "caption": "Algizid", "value": "Algizid" }
+      ]
+    },
+    {
+      "type": "Select",
+      "name": "Scale2Type",
+      "caption": "Waage 2",
+      "options": [
+        { "caption": "Chlor", "value": "Chlor" },
+        { "caption": "pH Minus", "value": "pH Minus" },
+        { "caption": "pH Plus", "value": "pH Plus" },
+        { "caption": "Flockungsmittel", "value": "Flockungsmittel" },
+        { "caption": "Aktivsauerstoff", "value": "Aktivsauerstoff" },
+        { "caption": "Algizid", "value": "Algizid" }
+      ]
+    }
+  ]
+}
