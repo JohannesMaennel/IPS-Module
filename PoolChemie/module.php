@@ -41,19 +41,175 @@ class PoolChemie extends IPSModule
         parent::Destroy();
     }
 
-    public function ApplyChanges()
-    {
-        parent::ApplyChanges();
+public function ApplyChanges()
+{
+    parent::ApplyChanges();
 
-        $baseTopic = rtrim($this->ReadPropertyString('BaseTopic'), '/');
+    $this->RegisterProfiles();
 
-        $pattern = '.*' . preg_quote($baseTopic, '/') . '\\/sensor\\/waage_tara?\\/state.*';
+    $scaleCount = $this->ReadPropertyInteger('ScaleCount');
 
-        $this->SetReceiveDataFilter($pattern);
-
-        IPS_LogMessage('PoolChemie', 'MQTT Filter gesetzt: ' . $pattern);
+    if ($scaleCount < 1) {
+        $scaleCount = 1;
     }
 
+    if ($scaleCount > 4) {
+        $scaleCount = 4;
+    }
+
+    for ($i = 1; $i <= $scaleCount; $i++) {
+        $this->CreateScaleVariables($i);
+    }
+
+    $baseTopic = rtrim($this->ReadPropertyString('BaseTopic'), '/');
+
+    $pattern = '.*' . preg_quote($baseTopic, '/') . '.*';
+
+    $this->SetReceiveDataFilter($pattern);
+
+    IPS_LogMessage('PoolChemie', 'ApplyChanges ausgeführt. MQTT Filter: ' . $pattern);
+}
+
+
+private function RegisterProfiles(): void
+{
+    if (!IPS_VariableProfileExists('POOLCHEMIE.Kilogramm')) {
+        IPS_CreateVariableProfile('POOLCHEMIE.Kilogramm', 2);
+        IPS_SetVariableProfileText('POOLCHEMIE.Kilogramm', '', ' kg');
+        IPS_SetVariableProfileDigits('POOLCHEMIE.Kilogramm', 1);
+    }
+}
+
+private function GetChemicalName(int $scale): string
+{
+    return $this->ReadPropertyString('Scale' . $scale . 'Type');
+}
+
+private function CreateScaleVariables(int $scale): void
+{
+    $name = $this->GetChemicalName($scale);
+
+    $this->RegisterVariableFloat(
+        'Weight_' . $scale,
+        $name . ' Gewicht',
+        'POOLCHEMIE.Kilogramm',
+        1
+    );
+
+    $this->RegisterVariableFloat(
+        'Tare_' . $scale,
+        $name . ' Tara',
+        'POOLCHEMIE.Kilogramm',
+        1
+    );
+
+    $this->RegisterVariableBoolean(
+        'ConsumptionEnabled_' . $scale,
+        $name . ' Verbrauch aktiv',
+        '~Switch',
+        1
+    );
+    $this->EnableAction('ConsumptionEnabled_' . $scale);
+
+    $this->RegisterVariableFloat(
+        'ConsumptionToday_' . $scale,
+        $name . ' Verbrauch Heute',
+        'POOLCHEMIE.Kilogramm',
+        1
+    );
+
+    $this->RegisterVariableFloat(
+        'ConsumptionTotal_' . $scale,
+        $name . ' Verbrauch Gesamt',
+        'POOLCHEMIE.Kilogramm',
+        1
+    );
+
+    $this->RegisterVariableBoolean(
+        'TareButton_' . $scale,
+        $name . ' Tara auslösen',
+        '~Switch',
+        1
+    );
+    $this->EnableAction('TareButton_' . $scale);
+
+    $this->RegisterVariableBoolean(
+        'ClearTareButton_' . $scale,
+        $name . ' Tara löschen',
+        '~Switch',
+        1
+    );
+    $this->EnableAction('ClearTareButton_' . $scale);
+
+    $this->RegisterVariableBoolean(
+        'ResetTotalButton_' . $scale,
+        $name . ' Gesamtverbrauch löschen',
+        '~Switch',
+       1
+    );
+    $this->EnableAction('ResetTotalButton_' . $scale);
+}
+
+public function RequestAction($Ident, $Value)
+{
+    if (preg_match('/^ConsumptionEnabled_([1-4])$/', $Ident, $matches)) {
+        SetValue($this->GetIDForIdent($Ident), (bool)$Value);
+        return;
+    }
+
+    if (preg_match('/^TareButton_([1-4])$/', $Ident, $matches)) {
+        $scale = (int)$matches[1];
+
+        $this->SendTare($scale);
+
+        SetValue($this->GetIDForIdent($Ident), false);
+        return;
+    }
+
+    if (preg_match('/^ClearTareButton_([1-4])$/', $Ident, $matches)) {
+        $scale = (int)$matches[1];
+
+        $this->SendClearTare($scale);
+
+        SetValue($this->GetIDForIdent($Ident), false);
+        return;
+    }
+
+    if (preg_match('/^ResetTotalButton_([1-4])$/', $Ident, $matches)) {
+        $scale = (int)$matches[1];
+
+        SetValue($this->GetIDForIdent('ConsumptionTotal_' . $scale), 0.0);
+        SetValue($this->GetIDForIdent($Ident), false);
+
+        return;
+    }
+
+    throw new Exception('Ungültiger Ident: ' . $Ident);
+}
+
+private function SendTare(int $scale): void
+{
+    IPS_LogMessage('PoolChemie', 'Tara auslösen Waage ' . $scale);
+
+    $baseTopic = rtrim($this->ReadPropertyString('BaseTopic'), '/');
+
+    $this->PublishMQTT(
+        $baseTopic . '/cmd/waage' . $scale . '/tare',
+        '1'
+    );
+}
+
+private function SendClearTare(int $scale): void
+{
+    IPS_LogMessage('PoolChemie', 'Tara löschen Waage ' . $scale);
+
+    $baseTopic = rtrim($this->ReadPropertyString('BaseTopic'), '/');
+
+    $this->PublishMQTT(
+        $baseTopic . '/cmd/waage' . $scale . '/tare_clear',
+        '1'
+    );
+}
 
      public function ReceiveData($JSONString)
     {
@@ -148,21 +304,22 @@ class PoolChemie extends IPSModule
         $this->CalculateConsumption($scale, $weight);
     }
 
-    private function PublishMQTT(string $topic, string $payload, bool $retain = false, int $qos = 0): void
-    {
-        $data = [
-            'DataID'           => self::MQTT_TX_DATA_ID,
-            'PacketType'       => 3,
-            'QualityOfService' => $qos,
-            'Retain'           => $retain,
-            'Topic'            => $topic,
-            'Payload'          => $payload
-        ];
+private function PublishMQTT(string $topic, string $payload, bool $retain = false, int $qos = 0): void
+{
+    $data = [
+        'DataID'           => '{7F7632D9-FA40-4F38-8DEA-C83CD4325A32}',
+        'PacketType'       => 3,
+        'QualityOfService' => $qos,
+        'Retain'           => $retain,
+        'Topic'            => $topic,
+        'Payload'          => $payload
+    ];
 
-        IPS_LogMessage('PoolChemie TX', json_encode($data));
+    IPS_LogMessage('PoolChemie TX', json_encode($data));
 
-        $this->SendDataToParent(json_encode($data));
-    }
+    $this->SendDataToParent(json_encode($data));
+}
+
 
     public function GetConfigurationForm()
     {
