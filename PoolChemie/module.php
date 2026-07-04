@@ -1,16 +1,23 @@
 <?php
 
 declare(strict_types=1);
+	class PoolChemie extends IPSModule
+	{
+		public function Create()
+		{
+			//Never delete this line!
+			parent::Create();
+		}
 
-class PoolChemie extends IPSModule
-{
-    public function Create()
-    {
-        parent::Create();
-    }
+		public function Destroy()
+		{
+			//Never delete this line!
+			parent::Destroy();
+		}
 
-    public function ApplyChanges()
-    {
-        parent::ApplyChanges();
-    }
-}
+		public function ApplyChanges()
+		{
+			//Never delete this line!
+			parent::ApplyChanges();
+		}
+	}
