@@ -3,5 +3,8 @@
     "author": "Johannes Maennel",
     "name": "Maennel Pool Module",
     "url": "https://github.com/JohannesMaennel/PoolChemie",
-    "version": "1.0"
+    "compatibility": {"version": "7.1"},
+    "version": "1.0",
+    "build": 0,
+    "date": 0
 }
