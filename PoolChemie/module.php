@@ -981,7 +981,7 @@ public function CheckDailyReset(): void
             $elements[] = [
                 'type' => 'NumberSpinner',
                 'name' => 'Scale' . $i . 'Threshold',
-                'caption' => 'Waage ' . $i . ' Schwellwert',
+                'caption' => 'Waage ' . $i . ' unterer Schwellwert Nachricht',
                 'suffix' => ' kg',
                 'digits' => 3,
                 'minimum' => 0,
@@ -1037,11 +1037,12 @@ public function CheckDailyReset(): void
         }
 
 
+        $actions = [];
 
         $actions[] = [
             'type' => 'Button',
-            'caption' => 'Schwellwerte jetzt prüfen',
-            'onClick' => 'POOLCHEMIE_CheckThresholdNotification($_IPS["TARGET"], true);'
+            'caption' => 'Push-Nachricht prüfen',
+            'onClick' => 'POOLCHEMIE_CheckThresholdNotification(' . $this->InstanceID . ', true);'
         ];
 
         $actions[] = [
