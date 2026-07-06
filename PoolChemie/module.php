@@ -41,6 +41,9 @@ class PoolChemie extends IPSModule
         // Nachrichtensystem        
         $this->RegisterPropertyString('NotificationTime', '09:00');
         $this->RegisterAttributeString('LastThresholdNotificationDate', '');
+        
+        $this->RegisterPropertyBoolean('NotificationEnabled', true);
+        $this->RegisterPropertyInteger('NotificationWebFrontID', 0);
 
         $this->RegisterTimer('ThresholdNotificationTimer',60000,'POOLCHEMIE_CheckThresholdNotification($_IPS["TARGET"]);');
 
@@ -54,7 +57,8 @@ class PoolChemie extends IPSModule
             $this->RegisterAttributeInteger('LastProcessedTareTime_' . $i, 0);
             $this->RegisterAttributeBoolean('HasProcessedTare_' . $i, false);            
 
-            $this->RegisterPropertyBoolean('Scale' . $i . 'CreateVariable', true);
+            $this->RegisterPropertyString('Scale' . $i . 'Items',json_encode($this->GetDefaultScaleItems()));
+
             $this->RegisterPropertyFloat('Scale' . $i . 'Threshold', 5.0);
         }
 
@@ -83,10 +87,15 @@ class PoolChemie extends IPSModule
             $scaleCount = 4;
         }
 
+
         for ($i = 1; $i <= $scaleCount; $i++) {
             $this->CreateScaleVariables($i);
-            $this->EnableArchiveForConsumptionTotal($i);
+
+            if ($this->IsScaleItemActive($i, 'ConsumptionTotal')) {
+                $this->EnableArchiveForConsumptionTotal($i);
+            }
         }
+
 
         $baseTopic = rtrim($this->ReadPropertyString('BaseTopic'), '/');
 
@@ -97,6 +106,88 @@ class PoolChemie extends IPSModule
         IPS_LogMessage('PoolChemie', 'ApplyChanges ausgeführt. MQTT Filter: ' . $pattern);
 }
 
+private function GetDefaultScaleItems(): array
+{
+    return [
+        [
+            'Index'  => 1,
+            'Ident'  => 'Weight',
+            'Name'   => 'Gewicht',
+            'Active' => true
+        ],
+        [
+            'Index'  => 2,
+            'Ident'  => 'Tare',
+            'Name'   => 'Tara',
+            'Active' => true
+        ],
+        [
+            'Index'  => 3,
+            'Ident'  => 'ConsumptionToday',
+            'Name'   => 'Verbrauch Heute',
+            'Active' => true
+        ],
+        [
+            'Index'  => 4,
+            'Ident'  => 'ConsumptionDay',
+            'Name'   => 'Verbrauch Tag',
+            'Active' => true
+        ],
+        [
+            'Index'  => 5,
+            'Ident'  => 'ConsumptionTotal',
+            'Name'   => 'Verbrauch Gesamt',
+            'Active' => true
+        ],
+        [
+            'Index'  => 6,
+            'Ident'  => 'ConsumptionEnabled',
+            'Name'   => 'Verbrauch aktiv',
+            'Active' => true
+        ],
+        [
+            'Index'  => 7,
+            'Ident'  => 'TareButton',
+            'Name'   => 'Tara auslösen',
+            'Active' => true
+        ],
+        [
+            'Index'  => 8,
+            'Ident'  => 'ClearTareButton',
+            'Name'   => 'Tara löschen',
+            'Active' => true
+        ],
+        [
+            'Index'  => 9,
+            'Ident'  => 'ResetTotalButton',
+            'Name'   => 'Gesamtverbrauch löschen',
+            'Active' => true
+        ]
+    ];
+}
+
+private function GetScaleItems(int $scale): array
+{
+    $json = $this->ReadPropertyString('Scale' . $scale . 'Items');
+    $items = json_decode($json, true);
+
+    if (!is_array($items)) {
+        return $this->GetDefaultScaleItems();
+    }
+
+    return $items;
+}
+
+private function IsScaleItemActive(int $scale, string $ident): bool
+{
+    foreach ($this->GetScaleItems($scale) as $item) {
+        if (($item['Ident'] ?? '') === $ident) {
+            return (bool)($item['Active'] ?? false);
+        }
+    }
+
+    return false;
+}
 
 private function EnableArchiveForConsumptionTotal(int $scale): void
 {
@@ -172,86 +263,128 @@ private function GetChemicalName(int $scale): string
 
 private function CreateScaleVariables(int $scale): void
 {
-    
-    if (!$this->ReadPropertyBoolean('Scale' . $scale . 'CreateVariable')) {
-        return;
-    }
-
     $name = $this->GetChemicalName($scale);
 
-    $this->RegisterVariableFloat(
-        'Weight_' . $scale,
-        $name . ' Gewicht',
-        'POOLCHEMIE.Kilogramm',
-        1
-    );
+    if ($this->IsScaleItemActive($scale, 'Weight')) {
+        $this->RegisterVariableFloat(
+            'Weight_' . $scale,
+            $name . ' Gewicht',
+            'POOLCHEMIE.Kilogramm',
+            10 + $scale
+        );
+        IPS_SetHidden($this->GetIDForIdent('Weight_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('Weight_' . $scale);
+    }
 
-    $this->RegisterVariableFloat(
-        'Tare_' . $scale,
-        $name . ' Tara',
-        'POOLCHEMIE.Kilogramm',
-        1
-    );
+    if ($this->IsScaleItemActive($scale, 'Tare')) {
+        $this->RegisterVariableFloat(
+            'Tare_' . $scale,
+            $name . ' Tara',
+            'POOLCHEMIE.Kilogramm',
+            20 + $scale
+        );
+        IPS_SetHidden($this->GetIDForIdent('Tare_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('Tare_' . $scale);
+    }
 
-    
-    $this->RegisterVariableFloat(
-        'ConsumptionDay_' . $scale,
-        $name . ' Verbrauch Tag',
-        'POOLCHEMIE.Kilogramm',
-        1
-    );
+    if ($this->IsScaleItemActive($scale, 'ConsumptionDay')) {
+        $this->RegisterVariableFloat(
+            'ConsumptionDay_' . $scale,
+            $name . ' Verbrauch Tag',
+            'POOLCHEMIE.Kilogramm',
+            30 + $scale
+        );
+        IPS_SetHidden($this->GetIDForIdent('ConsumptionDay_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('ConsumptionDay_' . $scale);
+    }
 
+    if ($this->IsScaleItemActive($scale, 'ConsumptionToday')) {
+        $this->RegisterVariableFloat(
+            'ConsumptionToday_' . $scale,
+            $name . ' Verbrauch Heute',
+            'POOLCHEMIE.Kilogramm',
+            40 + $scale
+        );
+        IPS_SetHidden($this->GetIDForIdent('ConsumptionToday_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('ConsumptionToday_' . $scale);
+    }
 
-    $this->RegisterVariableBoolean(
-        'ConsumptionEnabled_' . $scale,
-        $name . ' Verbrauch aktiv',
-        '~Switch',
-        1
-    );
-    $this->EnableAction('ConsumptionEnabled_' . $scale);
+    if ($this->IsScaleItemActive($scale, 'ConsumptionTotal')) {
+        $this->RegisterVariableFloat(
+            'ConsumptionTotal_' . $scale,
+            $name . ' Verbrauch Gesamt',
+            'POOLCHEMIE.Kilogramm',
+            50 + $scale
+        );
+        IPS_SetHidden($this->GetIDForIdent('ConsumptionTotal_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('ConsumptionTotal_' . $scale);
+    }
 
-    $this->RegisterVariableFloat(
-        'ConsumptionToday_' . $scale,
-        $name . ' Verbrauch Heute',
-        'POOLCHEMIE.Kilogramm',
-        1
-    );
+    if ($this->IsScaleItemActive($scale, 'ConsumptionEnabled')) {
+        $this->RegisterVariableBoolean(
+            'ConsumptionEnabled_' . $scale,
+            $name . ' Verbrauch aktiv',
+            '~Switch',
+            60 + $scale
+        );
+        $this->EnableAction('ConsumptionEnabled_' . $scale);
+        IPS_SetHidden($this->GetIDForIdent('ConsumptionEnabled_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('ConsumptionEnabled_' . $scale);
+    }
 
-    $this->RegisterVariableFloat(
-        'ConsumptionTotal_' . $scale,
-        $name . ' Verbrauch Gesamt',
-        'POOLCHEMIE.Kilogramm',
-        1
-    );
+    if ($this->IsScaleItemActive($scale, 'TareButton')) {
+        $this->RegisterVariableInteger(
+            'TareButton_' . $scale,
+            $name . ' Tara auslösen',
+            'POOLCHEMIE.Button',
+            70 + $scale
+        );
+        $this->EnableAction('TareButton_' . $scale);
+        IPS_SetHidden($this->GetIDForIdent('TareButton_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('TareButton_' . $scale);
+    }
 
+    if ($this->IsScaleItemActive($scale, 'ClearTareButton')) {
+        $this->RegisterVariableInteger(
+            'ClearTareButton_' . $scale,
+            $name . ' Tara löschen',
+            'POOLCHEMIE.DeleteButton',
+            80 + $scale
+        );
+        $this->EnableAction('ClearTareButton_' . $scale);
+        IPS_SetHidden($this->GetIDForIdent('ClearTareButton_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('ClearTareButton_' . $scale);
+    }
 
-    $this->RegisterVariableInteger(
-        'TareButton_' . $scale,
-        $name . ' Tara auslösen',
-        'POOLCHEMIE.Button',
-        1
-    );
-    $this->EnableAction('TareButton_' . $scale);
+    if ($this->IsScaleItemActive($scale, 'ResetTotalButton')) {
+        $this->RegisterVariableInteger(
+            'ResetTotalButton_' . $scale,
+            $name . ' Gesamtverbrauch löschen',
+            'POOLCHEMIE.DeleteButton',
+            90 + $scale
+        );
+        $this->EnableAction('ResetTotalButton_' . $scale);
+        IPS_SetHidden($this->GetIDForIdent('ResetTotalButton_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('ResetTotalButton_' . $scale);
+    }
+}
 
+private function HideVariableIfExists(string $ident): void
+{
+    $id = @$this->GetIDForIdent($ident);
 
-
-    $this->RegisterVariableInteger(
-        'ClearTareButton_' . $scale,
-        $name . ' Tara löschen',
-        'POOLCHEMIE.DeleteButton',
-        1
-    );
-    $this->EnableAction('ClearTareButton_' . $scale);
-    ;
-
-
-    $this->RegisterVariableInteger(
-        'ResetTotalButton_' . $scale,
-        $name . ' Gesamtverbrauch löschen',
-        'POOLCHEMIE.DeleteButton',
-        1
-    );
-    $this->EnableAction('ResetTotalButton_' . $scale);
+    if ($id !== false) {
+        IPS_SetHidden($id, true);
+    }
 }
 
 public function RequestAction($Ident, $Value)
@@ -390,7 +523,7 @@ private function ProcessWeight(int $scale, float $weight): void
         return;
     }
 
-    if (!$this->ReadPropertyBoolean('Scale' . $scale . 'CreateVariable')) {
+    if (!$this->IsScaleItemActive($scale, 'Weight')) {
         return;
     }
 
@@ -457,73 +590,6 @@ private function ProcessWeight(int $scale, float $weight): void
     $this->WriteAttributeBoolean('HasProcessedWeight_' . $scale, true);
 }
 
-public function CheckThresholdNotification(): void
-{
-    $configuredTime = $this->ReadPropertyString('NotificationTime');
-
-    if (!preg_match('/^\d{2}:\d{2}$/', $configuredTime)) {
-        return;
-    }
-
-    $nowTime = date('H:i');
-
-    if ($nowTime !== $configuredTime) {
-        return;
-    }
-
-    $today = date('Y-m-d');
-    $lastNotificationDate = $this->ReadAttributeString('LastThresholdNotificationDate');
-
-    if ($lastNotificationDate === $today) {
-        return;
-    }
-
-    $scaleCount = $this->ReadPropertyInteger('ScaleCount');
-
-    if ($scaleCount < 1) {
-        $scaleCount = 1;
-    }
-
-    if ($scaleCount > 4) {
-        $scaleCount = 4;
-    }
-
-    $chemicals = [];
-
-    for ($scale = 1; $scale <= $scaleCount; $scale++) {
-        if (!$this->ReadPropertyBoolean('Scale' . $scale . 'CreateVariable')) {
-            continue;
-        }
-
-        $weightID = @$this->GetIDForIdent('Weight_' . $scale);
-
-        if ($weightID === false) {
-            continue;
-        }
-
-        $weight = GetValue($weightID);
-        $threshold = $this->ReadPropertyFloat('Scale' . $scale . 'Threshold');
-
-        if ($weight < $threshold) {
-            $chemicals[] = $this->GetChemicalName($scale);
-        }
-    }
-
-    if (count($chemicals) === 0) {
-        $this->WriteAttributeString('LastThresholdNotificationDate', $today);
-        return;
-    }
-
-    $message = $this->BuildThresholdMessage($chemicals);
-
-    $this->SendModuleNotification(
-        'PoolChemie Schwellwert unterschritten',
-        $message
-    );
-
-    $this->WriteAttributeString('LastThresholdNotificationDate', $today);
-}
-
 private function ProcessTare(int $scale, float $tare): void
 {
     $scaleCount = $this->ReadPropertyInteger('ScaleCount');
@@ -532,7 +598,7 @@ private function ProcessTare(int $scale, float $tare): void
         return;
     }
 
-    if (!$this->ReadPropertyBoolean('Scale' . $scale . 'CreateVariable')) {
+    if (!$this->IsScaleItemActive($scale, 'Tare')) {
         return;
     }
 
@@ -644,11 +710,102 @@ private function SendModuleNotification(string $title, string $message): void
 {
     IPS_LogMessage($title, $message);
 
-    $this->SendDebug(
-        'Benachrichtigung',
-        $title . ': ' . $message,
-        0
+    $this->SendDebug('Benachrichtigung',$title . ': ' . $message,0);
+
+    if (!$this->ReadPropertyBoolean('NotificationEnabled')) {
+        return;
+    }
+
+    $webFrontID = $this->ReadPropertyInteger('NotificationWebFrontID');
+
+    if ($webFrontID <= 0 || !IPS_InstanceExists($webFrontID)) {
+        IPS_LogMessage('PoolChemie Benachrichtigung','Keine gültige WebFront-ID für Push-Benachrichtigung konfiguriert.');
+        return;
+    }
+
+    WFC_PushNotification(
+        $webFrontID,
+        $title,
+        $message,
+        '',
+        $this->InstanceID
     );
+}
+
+public function CheckThresholdNotification(bool $force = false): void
+{
+    $configuredTime = $this->ReadPropertyString('NotificationTime');
+
+    if (!$force) {
+        if (!preg_match('/^\d{2}:\d{2}$/', $configuredTime)) {
+            return;
+        }
+
+        $nowTime = date('H:i');
+
+        if ($nowTime !== $configuredTime) {
+            return;
+        }
+
+        $today = date('Y-m-d');
+        $lastNotificationDate = $this->ReadAttributeString('LastThresholdNotificationDate');
+
+        if ($lastNotificationDate === $today) {
+            return;
+        }
+    } else {
+        $today = date('Y-m-d');
+    }
+
+    $scaleCount = $this->ReadPropertyInteger('ScaleCount');
+
+    if ($scaleCount < 1) {
+        $scaleCount = 1;
+    }
+
+    if ($scaleCount > 4) {
+        $scaleCount = 4;
+    }
+
+    $chemicals = [];
+
+    for ($scale = 1; $scale <= $scaleCount; $scale++) {
+        if (!$this->IsScaleItemActive($scale, 'Weight')) {
+            continue;
+        }
+
+        $weightID = @$this->GetIDForIdent('Weight_' . $scale);
+
+        if ($weightID === false) {
+            continue;
+        }
+
+        $weight = GetValue($weightID);
+        $threshold = $this->ReadPropertyFloat('Scale' . $scale . 'Threshold');
+
+        if ($weight < $threshold) {
+            $chemicals[] = $this->GetChemicalName($scale);
+        }
+    }
+
+    if (count($chemicals) === 0) {
+        if (!$force) {
+            $this->WriteAttributeString('LastThresholdNotificationDate', $today);
+        }
+
+        return;
+    }
+
+    $message = $this->BuildThresholdMessage($chemicals);
+
+    $this->SendModuleNotification(
+        'PoolChemie Warnung',
+        $message
+    );
+
+    if (!$force) {
+        $this->WriteAttributeString('LastThresholdNotificationDate', $today);
+    }
 }
 
 private function BuildThresholdMessage(array $chemicals): string
@@ -733,6 +890,25 @@ public function CheckDailyReset(): void
         ];
 
         $elements[] = [
+            'type' => 'ValidationTextBox',
+            'name' => 'NotificationTime',
+            'caption' => 'Benachrichtigungszeit HH:MM'
+        ];
+
+        $elements[] = [
+            'type' => 'CheckBox',
+            'name' => 'NotificationEnabled',
+            'caption' => 'Benachrichtigung aktivieren'
+        ];
+
+        $elements[] = [
+            'type' => 'SelectInstance',
+            'name' => 'NotificationWebFrontID',
+            'caption' => 'WebFront für Push-Benachrichtigung'
+        ];
+
+
+        $elements[] = [
             'type' => 'Select',
             'name' => 'ScaleCount',
             'caption' => 'Anzahl Waagen',
@@ -796,12 +972,6 @@ public function CheckDailyReset(): void
 
         for ($i = 1; $i <= $scaleCount; $i++) {
             $elements[] = [
-                'type' => 'CheckBox',
-                'name' => 'Scale' . $i . 'CreateVariable',
-                'caption' => 'Waage ' . $i . ' als Variable anlegen'
-            ];
-
-            $elements[] = [
                 'type' => 'Select',
                 'name' => 'Scale' . $i . 'Type',
                 'caption' => 'Waage ' . $i . ' Chemie',
@@ -817,15 +987,62 @@ public function CheckDailyReset(): void
                 'minimum' => 0,
                 'maximum' => 1000
             ];
+
+            $elements[] = [
+                'type' => 'List',
+                'name' => 'Scale' . $i . 'Items',
+                'caption' => 'Waage ' . $i . ' Variablen',
+                'rowCount' => 9,
+                'add' => false,
+                'delete' => false,
+                'columns' => [
+                    [
+                        'caption' => 'Index',
+                        'name' => 'Index',
+                        'width' => '70px',
+                        'edit' => [
+                            'type' => 'NumberSpinner',
+                            'enabled' => false
+                        ]
+                    ],
+                    [
+                        'caption' => 'Name',
+                        'name' => 'Name',
+                        'width' => '300px',
+                        'edit' => [
+                            'type' => 'ValidationTextBox',
+                            'enabled' => false
+                        ]
+                    ],
+                    [
+                        'caption' => 'Ident',
+                        'name' => 'Ident',
+                        'width' => '180px',
+                        'edit' => [
+                            'type' => 'ValidationTextBox',
+                            'enabled' => false
+                        ]
+                    ],
+                    [
+                        'caption' => 'Aktiv',
+                        'name' => 'Active',
+                        'width' => '100px',
+                        'edit' => [
+                            'type' => 'CheckBox'
+                        ]
+                    ]
+                ],
+                'values' => $this->GetScaleItems($i)
+            ];
         }
 
-        $elements[] = [
-            'type' => 'ValidationTextBox',
-            'name' => 'NotificationTime',
-            'caption' => 'Benachrichtigungszeit HH:MM'
-        ];
 
-        $actions = [];
+
+        $actions[] = [
+            'type' => 'Button',
+            'caption' => 'Schwellwerte jetzt prüfen',
+            'onClick' => 'POOLCHEMIE_CheckThresholdNotification($_IPS["TARGET"], true);'
+        ];
 
         $actions[] = [
             'type' => 'Label',
