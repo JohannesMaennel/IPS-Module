@@ -54,6 +54,11 @@ class PoolChemie extends IPSModule
             $this->RegisterAttributeInteger('LastProcessedTime_' . $i, 0);
             $this->RegisterAttributeBoolean('HasProcessedWeight_' . $i, false);
 
+            
+            $this->RegisterAttributeFloat('LastWrittenWeight_' . $i, 0.0);
+            $this->RegisterAttributeInteger('LastWrittenWeightTime_' . $i, 0);
+            $this->RegisterAttributeBoolean('HasWrittenWeight_' . $i, false);
+
             $this->RegisterAttributeFloat('LastProcessedTare_' . $i, 0.0);
             $this->RegisterAttributeInteger('LastProcessedTareTime_' . $i, 0);
             $this->RegisterAttributeBoolean('HasProcessedTare_' . $i, false);            
@@ -91,6 +96,8 @@ class PoolChemie extends IPSModule
 
         for ($i = 1; $i <= $scaleCount; $i++) {
             $this->CreateScaleVariables($i);
+            $this->RegisterWeightEvent($i);
+
 
             if ($this->IsScaleItemActive($i, 'ConsumptionTotal')) {
                 $this->EnableArchiveForConsumptionTotal($i);
@@ -105,6 +112,33 @@ class PoolChemie extends IPSModule
         $this->SetReceiveDataFilter($pattern);
 
         IPS_LogMessage('PoolChemie', 'ApplyChanges ausgeführt. MQTT Filter: ' . $pattern);
+}
+
+private function RegisterWeightEvent(int $scale): void
+{
+    $weightID = @$this->GetIDForIdent('Weight_' . $scale);
+
+    if ($weightID === false) {
+        return;
+    }
+
+    if ($this->IsScaleItemActive($scale, 'Weight')) {
+        $this->RegisterMessage($weightID, VM_UPDATE);
+
+        $this->SendDebug(
+            'RegisterMessage',
+            'Waage ' . $scale . ': Gewicht-Variable registriert. ID=' . $weightID,
+            0
+        );
+    } else {
+        $this->UnregisterMessage($weightID, VM_UPDATE);
+
+        $this->SendDebug(
+            'RegisterMessage',
+            'Waage ' . $scale . ': Gewicht-Variable abgemeldet. ID=' . $weightID,
+            0
+        );
+    }
 }
 
 private function GetDefaultScaleItems(): array
@@ -271,7 +305,7 @@ private function CreateScaleVariables(int $scale): void
             'Weight_' . $scale,
             $name . ' Gewicht',
             'POOLCHEMIE.Kilogramm',
-            10 + $scale
+            1
         );
         IPS_SetHidden($this->GetIDForIdent('Weight_' . $scale), false);
     } else {
@@ -283,7 +317,7 @@ private function CreateScaleVariables(int $scale): void
             'Tare_' . $scale,
             $name . ' Tara',
             'POOLCHEMIE.Kilogramm',
-            20 + $scale
+            1
         );
         IPS_SetHidden($this->GetIDForIdent('Tare_' . $scale), false);
     } else {
@@ -295,7 +329,7 @@ private function CreateScaleVariables(int $scale): void
             'ConsumptionDay_' . $scale,
             $name . ' Verbrauch Tag',
             'POOLCHEMIE.Kilogramm',
-            30 + $scale
+            1
         );
         IPS_SetHidden($this->GetIDForIdent('ConsumptionDay_' . $scale), false);
     } else {
@@ -307,7 +341,7 @@ private function CreateScaleVariables(int $scale): void
             'ConsumptionToday_' . $scale,
             $name . ' Verbrauch Heute',
             'POOLCHEMIE.Kilogramm',
-            40 + $scale
+            1
         );
         IPS_SetHidden($this->GetIDForIdent('ConsumptionToday_' . $scale), false);
     } else {
@@ -319,7 +353,7 @@ private function CreateScaleVariables(int $scale): void
             'ConsumptionTotal_' . $scale,
             $name . ' Verbrauch Gesamt',
             'POOLCHEMIE.Kilogramm',
-            50 + $scale
+            1
         );
         IPS_SetHidden($this->GetIDForIdent('ConsumptionTotal_' . $scale), false);
     } else {
@@ -331,7 +365,7 @@ private function CreateScaleVariables(int $scale): void
             'ConsumptionEnabled_' . $scale,
             $name . ' Verbrauch aktiv',
             '~Switch',
-            60 + $scale
+            1
         );
         $this->EnableAction('ConsumptionEnabled_' . $scale);
         IPS_SetHidden($this->GetIDForIdent('ConsumptionEnabled_' . $scale), false);
@@ -344,7 +378,7 @@ private function CreateScaleVariables(int $scale): void
             'TareButton_' . $scale,
             $name . ' Tara auslösen',
             'POOLCHEMIE.Button',
-            70 + $scale
+            1
         );
         $this->EnableAction('TareButton_' . $scale);
         IPS_SetHidden($this->GetIDForIdent('TareButton_' . $scale), false);
@@ -357,7 +391,7 @@ private function CreateScaleVariables(int $scale): void
             'ClearTareButton_' . $scale,
             $name . ' Tara löschen',
             'POOLCHEMIE.DeleteButton',
-            80 + $scale
+            1
         );
         $this->EnableAction('ClearTareButton_' . $scale);
         IPS_SetHidden($this->GetIDForIdent('ClearTareButton_' . $scale), false);
@@ -370,7 +404,7 @@ private function CreateScaleVariables(int $scale): void
             'ResetTotalButton_' . $scale,
             $name . ' Gesamtverbrauch löschen',
             'POOLCHEMIE.DeleteButton',
-            90 + $scale
+            1
         );
         $this->EnableAction('ResetTotalButton_' . $scale);
         IPS_SetHidden($this->GetIDForIdent('ResetTotalButton_' . $scale), false);
@@ -535,9 +569,9 @@ private function ProcessWeight(int $scale, float $weight): void
     $minDelta = $this->ReadPropertyFloat('MinWeightDelta');
     $minInterval = $this->ReadPropertyInteger('MinUpdateInterval');
 
-    $hasLast = $this->ReadAttributeBoolean('HasProcessedWeight_' . $scale);
-    $lastWeight = $this->ReadAttributeFloat('LastProcessedWeight_' . $scale);
-    $lastTime = $this->ReadAttributeInteger('LastProcessedTime_' . $scale);
+    $hasLast = $this->ReadAttributeBoolean('HasWrittenWeight_' . $scale);
+    $lastWeight = $this->ReadAttributeFloat('LastWrittenWeight_' . $scale);
+    $lastTime = $this->ReadAttributeInteger('LastWrittenWeightTime_' . $scale);
 
     if ($hasLast) {
         $delta = abs($weight - $lastWeight);
@@ -548,9 +582,52 @@ private function ProcessWeight(int $scale, float $weight): void
         }
     }
 
-    // Gewicht immer aktualisieren
-    $this->UpdateWeightVariable($scale, $weight);
+    $this->WriteAttributeFloat('LastWrittenWeight_' . $scale, $weight);
+    $this->WriteAttributeInteger('LastWrittenWeightTime_' . $scale, $now);
+    $this->WriteAttributeBoolean('HasWrittenWeight_' . $scale, true);
 
+    // Das ist jetzt der entscheidende Auslöser.
+    // SetValue auf Weight_X löst danach MessageSink() aus.
+    $this->UpdateWeightVariable($scale, $weight);
+}
+
+public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+{
+    parent::MessageSink($TimeStamp, $SenderID, $Message, $Data);
+
+    if ($Message !== VM_UPDATE) {
+        return;
+    }
+
+    $scaleCount = $this->ReadPropertyInteger('ScaleCount');
+
+    if ($scaleCount < 1) {
+        $scaleCount = 1;
+    }
+
+    if ($scaleCount > 4) {
+        $scaleCount = 4;
+    }
+
+    for ($scale = 1; $scale <= $scaleCount; $scale++) {
+        $weightID = @$this->GetIDForIdent('Weight_' . $scale);
+
+        if ($weightID === false) {
+            continue;
+        }
+
+        if ($SenderID === $weightID) {
+            $newWeight = (float)GetValue($weightID);
+
+            $this->OnWeightVariableChanged($scale, $newWeight);
+
+            return;
+        }
+    }
+}
+
+private function OnWeightVariableChanged(int $scale, float $newWeight): void
+{
     $enabledID = @$this->GetIDForIdent('ConsumptionEnabled_' . $scale);
     $consumptionEnabled = false;
 
@@ -558,36 +635,41 @@ private function ProcessWeight(int $scale, float $weight): void
         $consumptionEnabled = GetValue($enabledID);
     }
 
-    // Wenn Verbrauch deaktiviert ist:
-    // keine Berechnung, keine Basis speichern
+    $this->SendDebug(
+        'OnChangeGewicht',
+        'Waage ' . $scale .
+        ': Neuer Wert=' . number_format($newWeight, 3) .
+        ' kg Verbrauch aktiv=' . ($consumptionEnabled ? 'JA' : 'NEIN'),
+        0
+    );
+
     if (!$consumptionEnabled) {
         $this->WriteAttributeBoolean('HasProcessedWeight_' . $scale, false);
-        $this->WriteAttributeInteger('LastProcessedTime_' . $scale, $now);
         return;
     }
 
-    // Wenn Verbrauch gerade erst aktiviert wurde:
-    // aktuelles Gewicht nur als neue Basis speichern
-    if (!$hasLast) {
-        $this->WriteAttributeFloat('LastProcessedWeight_' . $scale, $weight);
-        $this->WriteAttributeInteger('LastProcessedTime_' . $scale, $now);
+    $hasBase = $this->ReadAttributeBoolean('HasProcessedWeight_' . $scale);
+    $oldWeight = $this->ReadAttributeFloat('LastProcessedWeight_' . $scale);
+
+    if (!$hasBase) {
+        $this->WriteAttributeFloat('LastProcessedWeight_' . $scale, $newWeight);
+        $this->WriteAttributeInteger('LastProcessedTime_' . $scale, time());
         $this->WriteAttributeBoolean('HasProcessedWeight_' . $scale, true);
 
         $this->SendDebug(
             'Verbrauchsbasis',
-            'Waage ' . $scale . ': Neue Basis = ' . number_format($weight, 3) . ' kg',
+            'Waage ' . $scale .
+            ': Neue Basis=' . number_format($newWeight, 3) . ' kg',
             0
         );
 
         return;
     }
 
-    // Verbrauch berechnen
-    $this->CalculateConsumption($scale, $lastWeight, $weight);
+    $this->CalculateConsumption($scale, $oldWeight, $newWeight);
 
-    // Danach neues Gewicht als Basis speichern
-    $this->WriteAttributeFloat('LastProcessedWeight_' . $scale, $weight);
-    $this->WriteAttributeInteger('LastProcessedTime_' . $scale, $now);
+    $this->WriteAttributeFloat('LastProcessedWeight_' . $scale, $newWeight);
+    $this->WriteAttributeInteger('LastProcessedTime_' . $scale, time());
     $this->WriteAttributeBoolean('HasProcessedWeight_' . $scale, true);
 }
 
