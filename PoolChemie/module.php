@@ -43,7 +43,8 @@ class PoolChemie extends IPSModule
         $this->RegisterAttributeString('LastThresholdNotificationDate', '');
         
         $this->RegisterPropertyBoolean('NotificationEnabled', true);
-        $this->RegisterPropertyInteger('NotificationWebFrontID', 0);
+        $this->RegisterPropertyInteger('NotificationViewID', 0);
+        $this->RegisterPropertyInteger('NotificationControlID', 0); // 0 = automatisch finde
 
         $this->RegisterTimer('ThresholdNotificationTimer',60000,'POOLCHEMIE_CheckThresholdNotification($_IPS["TARGET"]);');
 
@@ -706,29 +707,90 @@ private function CalculateConsumption(int $scale, float $oldWeight, float $newWe
     );
 }
 
+private function GetNotificationControlID(): int
+{
+    $manualID = $this->ReadPropertyInteger('NotificationControlID');
+
+    if ($manualID > 0 && IPS_InstanceExists($manualID)) {
+        return $manualID;
+    }
+
+    foreach (IPS_GetInstanceList() as $instanceID) {
+        $instance = IPS_GetInstance($instanceID);
+
+        if (!isset($instance['ModuleInfo']['ModuleID'])) {
+            continue;
+        }
+
+        $moduleID = $instance['ModuleInfo']['ModuleID'];
+        $module = IPS_GetModule($moduleID);
+
+        $moduleName = $module['ModuleName'] ?? '';
+        $prefix = $module['Prefix'] ?? '';
+
+        if ($moduleName === 'Notification Control' || $prefix === 'NC') {
+            return $instanceID;
+        }
+    }
+
+    return 0;
+}
+
 private function SendModuleNotification(string $title, string $message): void
 {
     IPS_LogMessage($title, $message);
 
-    $this->SendDebug('Benachrichtigung',$title . ': ' . $message,0);
+    $this->SendDebug(
+        'Benachrichtigung',
+        $title . ': ' . $message,
+        0
+    );
 
     if (!$this->ReadPropertyBoolean('NotificationEnabled')) {
         return;
     }
 
-    $webFrontID = $this->ReadPropertyInteger('NotificationWebFrontID');
+    if (!function_exists('NC_PushNotification')) {
+        IPS_LogMessage(
+            'PoolChemie Benachrichtigung',
+            'NC_PushNotification ist auf diesem System nicht verfügbar. Nachricht wurde nur ins Log geschrieben: ' . $message
+        );
 
-    if ($webFrontID <= 0 || !IPS_InstanceExists($webFrontID)) {
-        IPS_LogMessage('PoolChemie Benachrichtigung','Keine gültige WebFront-ID für Push-Benachrichtigung konfiguriert.');
         return;
     }
 
-    WFC_PushNotification(
-        $webFrontID,
+    $notificationControlID = $this->GetNotificationControlID();
+
+    if ($notificationControlID <= 0 || !IPS_InstanceExists($notificationControlID)) {
+        IPS_LogMessage(
+            'PoolChemie Benachrichtigung',
+            'Keine gültige Notification-Control-Instanz gefunden.'
+        );
+
+        return;
+    }
+
+    $viewID = $this->ReadPropertyInteger('NotificationViewID');
+
+    if ($viewID <= 0 || !IPS_ObjectExists($viewID)) {
+        IPS_LogMessage(
+            'PoolChemie Benachrichtigung',
+            'Keine gültige View-ID für Push-Benachrichtigung konfiguriert.'
+        );
+
+        return;
+    }
+
+    // NC_PushNotification erwartet kurze Texte.
+    $title = mb_substr($title, 0, 32);
+    $message = mb_substr($message, 0, 256);
+
+    NC_PushNotification(
+        $notificationControlID,
+        $viewID,
         $title,
         $message,
-        '',
-        $this->InstanceID
+        'alarm'
     );
 }
 
@@ -903,9 +965,17 @@ public function CheckDailyReset(): void
 
         $elements[] = [
             'type' => 'SelectInstance',
-            'name' => 'NotificationWebFrontID',
+            'name' => 'NotificationViewID',
             'caption' => 'WebFront für Push-Benachrichtigung'
         ];
+
+        
+        $elements[] = [
+            'type' => 'SelectInstance',
+            'name' => 'NotificationControlID',
+            'caption' => 'Notification Control Instanz (optional)'
+        ];
+
 
 
         $elements[] = [
