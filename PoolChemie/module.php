@@ -85,7 +85,7 @@ class PoolChemie extends IPSModule
 
         for ($i = 1; $i <= $scaleCount; $i++) {
             $this->CreateScaleVariables($i);
-            $this->EnableArchiveForConsumptionTotal($i)
+            $this->EnableArchiveForConsumptionTotal($i);
         }
 
         $baseTopic = rtrim($this->ReadPropertyString('BaseTopic'), '/');
