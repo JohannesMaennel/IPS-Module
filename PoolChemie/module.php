@@ -45,8 +45,6 @@ public function Create()
     // Debuging einschalen
     $this->RegisterPropertyBoolean('DebugEnabled', false);
 
-        $this->RegisterPropertyString('ScaleConfig',json_encode($this->GetDefaultScaleConfig()));
-
     for ($i = 1; $i <= 4; $i++) {               
         $this->RegisterAttributeBoolean('IgnoreNextConsumption_' . $i, false);
         
