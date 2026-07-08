@@ -33,7 +33,9 @@ public function Create()
     $this->RegisterPropertyFloat('MinWeightDelta', 0.02);     // 20 g
     $this->RegisterPropertyInteger('MinUpdateInterval', 5);   // 5 Sekunden
     $this->RegisterPropertyFloat('MaxUpdateDiff', 0.5);       // Gewichtssprünge größer 0,5kg werden ignoriert in der Verbrauchsberechnung
-
+    $this->RegisterPropertyInteger('UpdateIntervalConsumption', 60);       // 60 Sekunden
+    $this->RegisterTimer('UpdateConsumptionTimer', 5000,'POOLCHEMIE_CheckConsumption($_IPS["TARGET"]);');
+    
     // Nachrichtensystem        
     $this->RegisterPropertyString('NotificationTime', '09:00');
     $this->RegisterAttributeString('LastThresholdNotificationDate', '');
@@ -47,7 +49,8 @@ public function Create()
 
     for ($i = 1; $i <= 4; $i++) {               
         $this->RegisterAttributeBoolean('IgnoreNextConsumption_' . $i, false);
-        
+        $this->RegisterAttributeFloat('LastConsumptionWeight_' . $i, 0);
+        $this->RegisterAttributeBoolean('HasLastConsumptionWeight_' . $i, false);
     }
 
     $this->ConnectParent(self::MQTT_SERVER_MODULE);
@@ -90,9 +93,8 @@ public function ApplyChanges()
     $pattern = '.*' . preg_quote($baseTopic, '/') . '.*';
 
     $this->SetReceiveDataFilter($pattern);
-
-    IPS_LogMessage('PoolChemie', 'ApplyChanges ausgeführt. MQTT Filter: ' . $pattern);
 }
+
 // Variablenprofile Registrienen
 private function RegisterProfiles(): void
 {
@@ -124,6 +126,7 @@ private function RegisterProfiles(): void
         );
     }
 }
+
 // Variablen angelegen / umbenennen / anzeigen
 private function CreateScaleVariables(int $scale): void
 {    
@@ -250,7 +253,28 @@ private function CreateScaleVariables(int $scale): void
     } else {
         $this->HideVariableIfExists('ResetTotalButton_' . $scale);
     }
+
+    if ($this->IsScaleItemActive($scale, 'BookLargeConsumptionButton')) {
+        $this->RegisterVariableInteger(
+            'BookLargeConsumptionButton_' . $scale,
+            $name . ' großen Verbrauch buchen',
+            'POOLCHEMIE.Button',
+            1
+        );
+
+        $this->EnableAction('BookLargeConsumptionButton_' . $scale);
+
+        $this->RenameVariableIfExists(
+            'BookLargeConsumptionButton_' . $scale,
+            $name . ' großen Verbrauch buchen'
+        );
+
+        IPS_SetHidden($this->GetIDForIdent('BookLargeConsumptionButton_' . $scale), false);
+    } else {
+        $this->HideVariableIfExists('BookLargeConsumptionButton_' . $scale);
+    }
 }
+
 //Hilfsfunktion umbenennen der Variablenm, falls existent
 private function RenameVariableIfExists(string $ident, string $name): void
 {
@@ -374,7 +398,87 @@ public function RequestAction($Ident, $Value)
         return;
     }
 
+    if (preg_match('/^BookLargeConsumptionButton_([1-4])$/', $Ident, $matches)) {
+        $scale = (int)$matches[1];
+
+        $this->BookCurrentJumpAsConsumption($scale);
+
+        SetValue($this->GetIDForIdent($Ident), 0);
+        return;
+    }
+
     throw new Exception('Ungültiger Ident: ' . $Ident);
+}
+
+private function BookCurrentJumpAsConsumption(int $scale): void
+{
+
+    if (!$this->ReadAttributeBoolean('HasLastConsumptionWeight_' . $scale)) {
+        $newWeight = (float)GetValue($weightID);
+
+        $this->WriteAttributeFloat('LastConsumptionWeight_' . $scale, $newWeight);
+        $this->WriteAttributeBoolean('HasLastConsumptionWeight_' . $scale, true);
+
+        $this->Debug(
+            'Großverbrauch',
+            'Waage ' . $scale . ': Keine Basis vorhanden. Aktuelles Gewicht wurde als Basis gesetzt.',
+            0
+        );
+
+        return;
+    }
+
+    $weightID = @$this->GetIDForIdent('Weight_' . $scale);
+
+    if ($weightID === false) {
+        $this->Debug(
+            'Großverbrauch',
+            'Waage ' . $scale . ': Keine Gewicht-Variable gefunden.',
+            0
+        );
+        return;
+    }
+
+    $todayID = @$this->GetIDForIdent('ConsumptionToday_' . $scale);
+    $totalID = @$this->GetIDForIdent('ConsumptionTotal_' . $scale);
+
+    if ($todayID === false || $totalID === false) {
+        $this->Debug(
+            'Großverbrauch',
+            'Waage ' . $scale . ': Verbrauchsvariablen fehlen.',
+            0
+        );
+        return;
+    }
+
+    $oldWeight = $this->ReadAttributeFloat('LastConsumptionWeight_' . $scale);
+    $newWeight = (float)GetValue($weightID);
+
+    $diff = $oldWeight - $newWeight;
+
+    if ($diff == 0.0) {
+        $this->Debug(
+            'Großverbrauch',
+            'Waage ' . $scale . ': Kein Verbrauch zu buchen.',
+            0
+        );
+        return;
+    }
+
+    SetValue($todayID, GetValue($todayID) + $diff);
+    SetValue($totalID, GetValue($totalID) + $diff);
+
+    $this->WriteAttributeFloat('LastConsumptionWeight_' . $scale, $newWeight);
+    $this->WriteAttributeBoolean('IgnoreNextConsumption_' . $scale, false);
+
+    $this->Debug(
+        'Großverbrauch',
+        'Waage ' . $scale .
+        ': Manuell gebucht. Alt=' . number_format($oldWeight, 3) .
+        ' kg Neu=' . number_format($newWeight, 3) .
+        ' kg Verbrauch=' . number_format($diff, 3) . ' kg',
+        0
+    );
 }
 
 private function SendTare(int $scale): void
@@ -487,62 +591,144 @@ private function ProcessWeight(int $scale, float $weight): void
         ' kg auf ' . number_format($weight, 3) . ' kg gesetzt.',
         0
     );
+}
 
-    // Verbrauch prüfen
-    $enabledID = @$this->GetIDForIdent('ConsumptionEnabled_' . $scale);
+public function CheckConsumption(): void
+{
+    $scaleCount = $this->ReadPropertyInteger('ScaleCount');
 
-    if ($enabledID === false || !GetValue($enabledID)) {
-        return;
+    if ($scaleCount < 1) {
+        $scaleCount = 1;
     }
 
-    // Direkt nach Umschalten Verbrauch aktiv: einmal überspringen
-    if ($this->ReadAttributeBoolean('IgnoreNextConsumption_' . $scale)) {
-        $this->WriteAttributeBoolean('IgnoreNextConsumption_' . $scale, false);
+    if ($scaleCount > 4) {
+        $scaleCount = 4;
+    }
+
+    $updateIntervalConsumption = $this->ReadPropertyInteger('UpdateIntervalConsumption');
+    $maxUpdateDiff = $this->ReadPropertyFloat('MaxUpdateDiff');
+
+    for ($scale = 1; $scale <= $scaleCount; $scale++) {
+        $weightID = @$this->GetIDForIdent('Weight_' . $scale);
+
+        if ($weightID === false) {
+            continue;
+        }
+
+        $enabledID = @$this->GetIDForIdent('ConsumptionEnabled_' . $scale);
+
+        if ($enabledID === false || !GetValue($enabledID)) {
+            continue;
+        }
+
+        $todayID = @$this->GetIDForIdent('ConsumptionToday_' . $scale);
+
+        if ($todayID === false) {
+            continue;
+        }
+
+        $totalID = @$this->GetIDForIdent('ConsumptionTotal_' . $scale);
+
+        if ($totalID === false) {
+            continue;
+        }
+
+        $newWeight = (float)GetValue($weightID);
+
+        /*
+         * Nach Tara, Tara löschen oder Umschalten von Verbrauch aktiv
+         * wird einmalig nur die neue Basis gesetzt.
+         */
+        if ($this->ReadAttributeBoolean('IgnoreNextConsumption_' . $scale)) {
+            $this->WriteAttributeBoolean('IgnoreNextConsumption_' . $scale, false);
+            $this->WriteAttributeFloat('LastConsumptionWeight_' . $scale, $newWeight);
+            $this->WriteAttributeBoolean('HasLastConsumptionWeight_' . $scale, true);
+
+            $this->Debug(
+                'Verbrauch',
+                'Waage ' . $scale . ': Verbrauchsbasis nach Umschaltung gesetzt: ' . number_format($newWeight, 3) . ' kg',
+                0
+            );
+
+            continue;
+        }
+
+        /*
+         * Wenn noch keine Verbrauchsbasis existiert:
+         * aktuellen Wert nur als Basis speichern.
+         */
+        if (!$this->ReadAttributeBoolean('HasLastConsumptionWeight_' . $scale)) {
+            $this->WriteAttributeFloat('LastConsumptionWeight_' . $scale, $newWeight);
+            $this->WriteAttributeBoolean('HasLastConsumptionWeight_' . $scale, true);
+
+            $this->Debug(
+                'Verbrauch',
+                'Waage ' . $scale . ': Erste Verbrauchsbasis gesetzt: ' . number_format($newWeight, 3) . ' kg',
+                0
+            );
+
+            continue;
+        }
+
+        /*
+         * Zyklische Verbrauchsberechnung nur nach Ablauf des Intervalls.
+         * Als Zeitbasis nehmen wir die letzte Änderung von Verbrauch Gesamt.
+         */
+        $variableInfo = IPS_GetVariable($totalID);
+        $lastChanged = (int)$variableInfo['VariableChanged'];
+
+        if (($lastChanged + $updateIntervalConsumption) > time()) {
+            continue;
+        }
+
+        $oldWeight = $this->ReadAttributeFloat('LastConsumptionWeight_' . $scale);
+        $diff = $oldWeight - $newWeight;
+
+        /*
+         * Keine Änderung = nichts buchen.
+         */        
+        if (abs($diff) < 0.001) {
+            continue;
+        }
+
+
+        /*
+         * Sprungfilter.
+         * Verhindert große Ausreißer, Tara-Sprünge oder Kanisterbewegungen.
+         */
+        if ($maxUpdateDiff > 0 && abs($diff) >= abs($maxUpdateDiff)) {
+            $this->Debug(
+                'Sprungfilter',
+                'Waage ' . $scale .
+                ': Verbrauch ignoriert. Alt=' . number_format($oldWeight, 3) .
+                ' kg Neu=' . number_format($newWeight, 3) .
+                ' kg Diff=' . number_format($diff, 3) .
+                ' kg Max=' . number_format($maxUpdateDiff, 3) . ' kg',
+                0
+            );
+
+            /*
+             * Optional:
+             * Hier NICHT die Basis aktualisieren, damit ein echter Ausreißer
+             * nicht zur neuen Referenz wird.
+             */
+            continue;
+        }
+
+        SetValue($todayID, GetValue($todayID) + $diff);
+        SetValue($totalID, GetValue($totalID) + $diff);
+
+        $this->WriteAttributeFloat('LastConsumptionWeight_' . $scale, $newWeight);
 
         $this->Debug(
             'Verbrauch',
             'Waage ' . $scale .
-            ': Erste Messung nach Umschaltung ignoriert.',
+            ': Alt=' . number_format($oldWeight, 3) .
+            ' kg Neu=' . number_format($newWeight, 3) .
+            ' kg Verbrauch=' . number_format($diff, 3) . ' kg',
             0
         );
-
-        return;
     }
-
-    // Verbrauch berechnen
-    $this->CalculateConsumption($scale, $oldWeight, $weight);
-}
-
-private function CalculateConsumption(int $scale, float $oldWeight, float $newWeight): void
-{
-    $diff = $oldWeight - $newWeight;
-
-    // Gewicht gestiegen oder gleich geblieben = kein Verbrauch
-    $maxUpdateDiff = $this->ReadPropertyFloat('MaxUpdateDiff');
-
-    if (abs($diff) >= $maxUpdateDiff) {
-        return;
-    }
-
-    $todayID = @$this->GetIDForIdent('ConsumptionToday_' . $scale);
-    $totalID = @$this->GetIDForIdent('ConsumptionTotal_' . $scale);
-
-    if ($todayID !== false) {
-        SetValue($todayID, GetValue($todayID) + $diff);
-    }
-
-    if ($totalID !== false) {
-        SetValue($totalID, GetValue($totalID) + $diff);
-    }
-
-    $this->Debug(
-        'Verbrauch',
-        'Waage ' . $scale .
-        ': Alt=' . number_format($oldWeight, 3) .
-        ' kg Neu=' . number_format($newWeight, 3) .
-        ' kg Verbrauch=' . number_format($diff, 3) . ' kg',
-        0
-    );
 }
 
 //Aktualisiert die Tarevariable
@@ -588,7 +774,6 @@ private function PublishMQTT(string $topic, string $payload, bool $retain = fals
 
     $this->SendDataToParent($json);
 }
-
 
 public function CheckDailyReset(): void
 {
@@ -818,10 +1003,10 @@ private function BuildThresholdMessage(array $chemicals): string
         '. Bitte diese Chemikalien nachbestellen.';
 }
 
-private function Debug(string $title, string $message): void
+private function Debug(string $title, string $message,int $format = 0): void
 {
     if ($this->ReadPropertyBoolean('DebugEnabled')) {
-        $this->SendDebug($title, $message, 0);
+        $this->SendDebug($title, $message, $format);
     }
 }
 
@@ -950,11 +1135,21 @@ public function GetConfigurationForm()
     $elements[] = [
         'type' => 'NumberSpinner',
         'name' => 'MaxUpdateDiff',
-        'caption' => 'Maximale Gewichtsänderung',
+        'caption' => 'Maximale Gewichtsänderung Verbrauchsberechnung',
         'suffix' => ' kg',
         'digits' => 3,
         'minimum' => 0,
         'maximum' => 1000
+    ];
+
+    $elements[] = [
+        'type' => 'NumberSpinner',
+        'name' => 'UpdateIntervalConsumption',
+        'caption' => 'Aktualisierungsintervall Verbrauchsberechnung',
+        'suffix' => ' s',
+        'digits' => 0,
+        'minimum' => 5,
+        'maximum' => 7200
     ];
 
     /*
@@ -1075,6 +1270,14 @@ public function GetConfigurationForm()
                 'edit' => [
                     'type' => 'CheckBox'
                 ]
+            ],            
+            [
+                'caption' => 'Großverbrauch',
+                'name' => 'BookLargeConsumptionButton',
+                'width' => '120px',
+                'edit' => [
+                    'type' => 'CheckBox'
+                ]
             ]
         ],
         'values' => $scaleConfig
@@ -1102,33 +1305,10 @@ public function GetConfigurationForm()
 
 private function GetScaleConfigForForm(int $scaleCount): array
 {
-    $config = $this->GetScaleConfig();
-    $defaults = $this->GetDefaultScaleConfig();
-
     $result = [];
 
     for ($i = 1; $i <= $scaleCount; $i++) {
-        $row = null;
-
-        foreach ($config as $configRow) {
-            if ((int)($configRow['Scale'] ?? 0) === $i) {
-                $row = $configRow;
-                break;
-            }
-        }
-
-        if ($row === null) {
-            foreach ($defaults as $defaultRow) {
-                if ((int)($defaultRow['Scale'] ?? 0) === $i) {
-                    $row = $defaultRow;
-                    break;
-                }
-            }
-        }
-
-        if ($row !== null) {
-            $result[] = $row;
-        }
+        $result[] = $this->GetScaleConfigRow($i);
     }
 
     return $result;
@@ -1190,7 +1370,8 @@ private function GetDefaultScaleConfig(): array
             'ConsumptionEnabled' => true,
             'TareButton' => true,
             'ClearTareButton' => true,
-            'ResetTotalButton' => true
+            'ResetTotalButton' => true,
+            'BookLargeConsumptionButton' => true
         ],
         [
             'Scale' => 2,
@@ -1204,7 +1385,8 @@ private function GetDefaultScaleConfig(): array
             'ConsumptionEnabled' => true,
             'TareButton' => true,
             'ClearTareButton' => true,
-            'ResetTotalButton' => true
+            'ResetTotalButton' => true,
+            'BookLargeConsumptionButton' => true
         ],
         [
             'Scale' => 3,
@@ -1218,7 +1400,8 @@ private function GetDefaultScaleConfig(): array
             'ConsumptionEnabled' => true,
             'TareButton' => true,
             'ClearTareButton' => true,
-            'ResetTotalButton' => true
+            'ResetTotalButton' => true,
+            'BookLargeConsumptionButton' => true
         ],
         [
             'Scale' => 4,
@@ -1232,7 +1415,8 @@ private function GetDefaultScaleConfig(): array
             'ConsumptionEnabled' => true,
             'TareButton' => true,
             'ClearTareButton' => true,
-            'ResetTotalButton' => true
+            'ResetTotalButton' => true,
+            'BookLargeConsumptionButton' => true
         ]
     ];
 }
@@ -1251,19 +1435,22 @@ private function GetScaleConfig(): array
 
 private function GetScaleConfigRow(int $scale): array
 {
-    foreach ($this->GetScaleConfig() as $row) {
-        if ((int)($row['Scale'] ?? 0) === $scale) {
-            return $row;
-        }
-    }
+    $defaultRow = [];
 
     foreach ($this->GetDefaultScaleConfig() as $row) {
         if ((int)($row['Scale'] ?? 0) === $scale) {
-            return $row;
+            $defaultRow = $row;
+            break;
         }
     }
 
-    return [];
+    foreach ($this->GetScaleConfig() as $row) {
+        if ((int)($row['Scale'] ?? 0) === $scale) {
+            return array_merge($defaultRow, $row);
+        }
+    }
+
+    return $defaultRow;
 }
 
 }
