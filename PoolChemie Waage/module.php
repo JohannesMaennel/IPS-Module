@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-class PoolChemie extends IPSModule
+class PoolChemie_Waage extends IPSModule
 {
 
 private const MQTT_SERVER_MODULE = '{C6D2AEB3-6E1F-4B2E-8E69-3A1A00246850}';
