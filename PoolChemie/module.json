@@ -1,9 +1,9 @@
 {
     "id": "{C384FA35-60DC-4F35-B86E-7B8CC1372E01}",
-    "name": "PoolChemie",
+    "name": "PoolChemie Waage",
     "type": 3,
     "vendor": "Johannes Maennel",
-    "aliases": ["PoolChemie"],
+    "aliases": ["PoolChemie Waage"],
     "parentRequirements": ["{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}"],
     "childRequirements": [],
     "implemented": ["{7F7632D9-FA40-4F38-8DEA-C83CD4325A32}"],
