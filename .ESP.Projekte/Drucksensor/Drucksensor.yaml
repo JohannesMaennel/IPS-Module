@@ -11,7 +11,7 @@ esp32:
     type: esp-idf
 
 logger:
-  level: debug
+  level: info
 
 ota:
   - platform: esphome
@@ -20,6 +20,8 @@ ota:
 wifi:
   ssid: !secret wifi_ssid  
   password: !secret wifi_password
+  output_power: 8.5dBm
+  fast_connect: on
   power_save_mode: none
   ap:
     ssid: !secret ap_ssid
@@ -38,12 +40,19 @@ api:
   encryption:
     key: !secret api_key
 
-# mqtt:
-#   broker: !secret mqtt_broker
-#   username: !secret mqtt_username
-#   password: !secret mqtt_password
-#   topic_prefix: Pool/Chemiewaage
-#   discovery: false
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: Pool/Chemiewaage
+  discovery: false
+
+#GPIO05 = SDA Display
+#GPIO06 = SCL Display
+#GPIO08 = LED Blau
+#GPIO04 = Wasseruhr
+#GPIO03 = Gasuhr
+
 
 i2c:
     sda: GPIO1
@@ -70,7 +79,7 @@ sensor:
     lambda: |-
       float voltage = id(pressure_voltage).state;
 
-      float psi = ((voltage - 0.5) * 80.0) / 4.0;
+      float psi = ((voltage - 0.388) * 80.0) / 4.0;
       float bar = psi * 0.0689476;
 
       if(bar < 0) bar = 0;
