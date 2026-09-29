@@ -654,7 +654,35 @@ class Drucksensor extends IPSModule
         }
 
         AC_SetLoggingStatus($archiveID, $variableID, $enabled);
+
+        if ($enabled && function_exists('AC_SetAggregationType')) {
+            AC_SetAggregationType(
+                $archiveID,
+                $variableID,
+                $this->GetAggregationTypeForVariable($variableID)
+            );
+        }
+
         IPS_ApplyChanges($archiveID);
+    }
+
+    private function GetAggregationTypeForVariable(int $variableID): int
+    {
+        foreach ($this->GetVariableDefinitions() as $definition) {
+            $currentVariableID = @$this->GetIDForIdent($definition['ident']);
+
+            if ($currentVariableID !== $variableID) {
+                continue;
+            }
+
+            if (in_array($definition['key'], ['water_total_m3', 'gas_total_m3'], true)) {
+                return 1;
+            }
+
+            break;
+        }
+
+        return 0;
     }
 
     private function GetArchiveControlID(): int
