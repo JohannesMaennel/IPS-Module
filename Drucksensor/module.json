@@ -6,7 +6,7 @@
     "aliases": ["Drucksensor"],
     "parentRequirements": ["{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}"],
     "childRequirements": [],
-    "implemented": ["{1FB55D36-1964-45C4-89CA-3753FDE9EB39}"],
+    "implemented": ["{7F7632D9-FA40-4F38-8DEA-C83CD4325A32}"],
     "prefix": "PRESSURE",
     "url": ""
 }
