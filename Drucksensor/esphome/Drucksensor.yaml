@@ -1,0 +1,477 @@
+esphome:
+  name: drucksensor
+
+  project:
+    name: maennel.drucksensor
+    version: "0.1.0"
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: info
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid  
+  password: !secret wifi_password
+  output_power: 8.5dBm
+  fast_connect: on
+  power_save_mode: none
+  ap:
+    ssid: !secret ap_ssid
+    password: !secret ap_password
+
+captive_portal:
+
+web_server:
+  port: 80  
+  include_internal: true
+  auth:
+    username: admin
+    password: !secret webserver_password
+
+
+api:
+  encryption:
+    key: !secret api_key
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  topic_prefix: drucksensor
+  discovery: false
+  on_json_message:
+    - topic: drucksensor/cmd
+      then:
+        - lambda: |-
+            if (x.containsKey("pressure_calibration_voltage_1")) {
+              id(pressure_calibration_voltage_1) = std::max(0.0f, x["pressure_calibration_voltage_1"].as<float>());
+            }
+            if (x.containsKey("pressure_calibration_bar_1")) {
+              id(pressure_calibration_bar_1) = std::max(0.0f, x["pressure_calibration_bar_1"].as<float>());
+            }
+            if (x.containsKey("pressure_calibration_voltage_2")) {
+              id(pressure_calibration_voltage_2) = std::max(0.0f, x["pressure_calibration_voltage_2"].as<float>());
+            }
+            if (x.containsKey("pressure_calibration_bar_2")) {
+              id(pressure_calibration_bar_2) = std::max(0.0f, x["pressure_calibration_bar_2"].as<float>());
+            }
+            if (x.containsKey("gas_counter_offset_m3")) {
+              id(gas_counter_offset_m3) = std::max(0.0f, x["gas_counter_offset_m3"].as<float>());
+            } else if (x.containsKey("gas_counter_offset")) {
+              id(gas_counter_offset_m3) = std::max(0.0f, x["gas_counter_offset"].as<float>());
+            }
+            if (x.containsKey("gas_pulses_per_m3")) {
+              id(gas_pulses_per_m3) = std::max(1.0f, x["gas_pulses_per_m3"].as<float>());
+            } else if (x.containsKey("gas_pulse_per_m3")) {
+              id(gas_pulses_per_m3) = std::max(1.0f, x["gas_pulse_per_m3"].as<float>());
+            }
+            if (x.containsKey("water_pulses_per_m3")) {
+              id(water_pulses_per_m3) = std::max(1.0f, x["water_pulses_per_m3"].as<float>());
+            }
+            if (x.containsKey("water_counter_offset_m3")) {
+              id(water_counter_offset_m3) = std::max(0.0f, x["water_counter_offset_m3"].as<float>());
+            } else if (x.containsKey("water_counter_offset")) {
+              id(water_counter_offset_m3) = std::max(0.0f, x["water_counter_offset"].as<float>());
+            }
+  birth_message:
+    topic: drucksensor/status
+    payload: online
+    retain: true
+  will_message:
+    topic: drucksensor/status
+    payload: offline
+    retain: true
+  shutdown_message:
+    topic: drucksensor/status
+    payload: offline
+    retain: true
+  log_topic:
+    topic: drucksensor/debug
+    retain: true
+
+#GPIO05 = SDA Display
+#GPIO06 = SCL Display
+#GPIO08 = LED Blau
+#GPIO04 = Wasseruhr
+#GPIO03 = Gasuhr
+
+globals:
+  - id: water_pulses_per_m3
+    type: float
+    restore_value: yes
+    initial_value: '1000.0'
+  - id: gas_pulses_per_m3
+    type: float
+    restore_value: yes
+    initial_value: '100.0'
+  - id: pressure_calibration_voltage_1
+    type: float
+    restore_value: yes
+    initial_value: '0.3880'
+  - id: pressure_calibration_bar_1
+    type: float
+    restore_value: yes
+    initial_value: '0.0000'
+  - id: pressure_calibration_voltage_2
+    type: float
+    restore_value: yes
+    initial_value: '4.3880'
+  - id: pressure_calibration_bar_2
+    type: float
+    restore_value: yes
+    initial_value: '5.5158'
+  - id: water_counter_offset_m3
+    type: float
+    restore_value: yes
+    initial_value: '0.0000'
+  - id: gas_counter_offset_m3
+    type: float
+    restore_value: yes
+    initial_value: '0.0000'
+
+
+i2c:
+    sda: GPIO5
+    scl: GPIO6
+    scan: true
+
+number:
+  - platform: template
+    name: "Druck Kalibrierung Spannung 1"
+    id: pressure_calibration_voltage_1_number
+    internal: true
+    entity_category: config
+    unit_of_measurement: "V"
+    min_value: 0
+    max_value: 10
+    step: 0.0001
+    mode: box
+    lambda: |-
+      return id(pressure_calibration_voltage_1);
+    set_action:
+      - lambda: |-
+          id(pressure_calibration_voltage_1) = x;
+
+  - platform: template
+    name: "Druck Kalibrierung Druck 1"
+    id: pressure_calibration_bar_1_number
+    internal: true
+    entity_category: config
+    unit_of_measurement: "bar"
+    min_value: 0
+    max_value: 100
+    step: 0.0001
+    mode: box
+    lambda: |-
+      return id(pressure_calibration_bar_1);
+    set_action:
+      - lambda: |-
+          id(pressure_calibration_bar_1) = x;
+
+  - platform: template
+    name: "Druck Kalibrierung Spannung 2"
+    id: pressure_calibration_voltage_2_number
+    internal: true
+    entity_category: config
+    unit_of_measurement: "V"
+    min_value: 0
+    max_value: 10
+    step: 0.0001
+    mode: box
+    lambda: |-
+      return id(pressure_calibration_voltage_2);
+    set_action:
+      - lambda: |-
+          id(pressure_calibration_voltage_2) = x;
+
+  - platform: template
+    name: "Druck Kalibrierung Druck 2"
+    id: pressure_calibration_bar_2_number
+    internal: true
+    entity_category: config
+    unit_of_measurement: "bar"
+    min_value: 0
+    max_value: 100
+    step: 0.0001
+    mode: box
+    lambda: |-
+      return id(pressure_calibration_bar_2);
+    set_action:
+      - lambda: |-
+          id(pressure_calibration_bar_2) = x;
+
+  - platform: template
+    name: "Wasser Impulse pro m3"
+    id: water_pulses_per_m3_number
+    internal: true
+    entity_category: config
+    min_value: 1
+    max_value: 100000
+    step: 1
+    mode: box
+    lambda: |-
+      return id(water_pulses_per_m3);
+    set_action:
+      - lambda: |-
+          id(water_pulses_per_m3) = x;
+
+  - platform: template
+    name: "Wasserzaehler Offset"
+    id: water_counter_offset_m3_number
+    internal: true
+    entity_category: config
+    min_value: 0
+    max_value: 1000000
+    step: 0.0001
+    mode: box
+    lambda: |-
+      return id(water_counter_offset_m3);
+    set_action:
+      - lambda: |-
+          id(water_counter_offset_m3) = x;
+
+  - platform: template
+    name: "Gas Impulse pro m3"
+    id: gas_pulses_per_m3_number
+    internal: true
+    entity_category: config
+    min_value: 1
+    max_value: 100000
+    step: 1
+    mode: box
+    lambda: |-
+      return id(gas_pulses_per_m3);
+    set_action:
+      - lambda: |-
+          id(gas_pulses_per_m3) = x;
+
+  - platform: template
+    name: "Gaszaehler Offset"
+    id: gas_counter_offset_m3_number
+    internal: true
+    entity_category: config
+    min_value: 0
+    max_value: 1000000
+    step: 0.0001
+    mode: box
+    lambda: |-
+      return id(gas_counter_offset_m3);
+    set_action:
+      - lambda: |-
+          id(gas_counter_offset_m3) = x;
+
+
+ads1115:
+  - address: 0x48
+
+sensor:
+  - platform: internal_temperature
+    id: esp_temperature
+    name: "ESP Temperatur"
+    internal: true
+    unit_of_measurement: "°C"
+    update_interval: 10s
+
+  - platform: ads1115
+    multiplexer: A0_GND
+    gain: 4.096
+    id: pressure_voltage
+    name: "Drucksensor Spannung"
+    internal: true
+    update_interval: 1s
+
+  - platform: template
+    name: "Druck"
+    id: pressure_bar
+    internal: true
+    unit_of_measurement: "bar"
+    accuracy_decimals: 4
+    lambda: |-
+      float voltage = id(pressure_voltage).state;
+      float voltage_1 = id(pressure_calibration_voltage_1);
+      float pressure_1 = id(pressure_calibration_bar_1);
+      float voltage_2 = id(pressure_calibration_voltage_2);
+      float pressure_2 = id(pressure_calibration_bar_2);
+      float bar = pressure_1;
+
+      // Zweipunktkalibrierung als lineare Interpolation.
+      if (fabsf(voltage_2 - voltage_1) > 0.000001f) {
+        bar = pressure_1 + ((voltage - voltage_1) * (pressure_2 - pressure_1) / (voltage_2 - voltage_1));
+      }
+
+      if(bar < 0) bar = 0;
+
+      return bar;
+    update_interval: 1s
+
+  - platform: pulse_meter
+    id: water_pulse_rate
+    internal: true
+    pin:
+      number: GPIO4
+      mode:
+        input: true
+        pullup: true
+    unit_of_measurement: "imp/min"
+    accuracy_decimals: 0
+    internal_filter: 100ms
+    timeout: 10s
+    total:
+      id: water_pulse_total
+      internal: true
+      unit_of_measurement: "imp"
+      accuracy_decimals: 0
+
+  - platform: template
+    name: "Wasserzaehler"
+    id: water_total_m3
+    internal: true
+    unit_of_measurement: "m3"
+    device_class: water
+    state_class: total_increasing
+    accuracy_decimals: 4
+    lambda: |-
+      if (id(water_pulses_per_m3) <= 0.0f) {
+        return id(water_counter_offset_m3);
+      }
+      return (id(water_pulse_total).state / id(water_pulses_per_m3)) + id(water_counter_offset_m3);
+    update_interval: 1s
+
+  - platform: template
+    name: "Wasser Durchfluss"
+    id: water_flow_l_min
+    internal: true
+    unit_of_measurement: "l/min"
+    state_class: measurement
+    accuracy_decimals: 2
+    lambda: |-
+      if (id(water_pulses_per_m3) <= 0.0f) {
+        return 0.0f;
+      }
+      return (id(water_pulse_rate).state / id(water_pulses_per_m3)) * 1000.0f;
+    update_interval: 1s
+
+  - platform: pulse_meter
+    id: gas_pulse_rate
+    internal: true
+    pin:
+      number: GPIO3
+      mode:
+        input: true
+        pullup: true
+    unit_of_measurement: "imp/min"
+    accuracy_decimals: 0
+    internal_filter: 100ms
+    timeout: 10s
+    total:
+      id: gas_pulse_total
+      internal: true
+      unit_of_measurement: "imp"
+      accuracy_decimals: 0
+
+  - platform: template
+    name: "Gaszaehler"
+    id: gas_total_m3
+    internal: true
+    unit_of_measurement: "m3"
+    device_class: gas
+    state_class: total_increasing
+    accuracy_decimals: 4
+    lambda: |-
+      if (id(gas_pulses_per_m3) <= 0.0f) {
+        return id(gas_counter_offset_m3);
+      }
+      return (id(gas_pulse_total).state / id(gas_pulses_per_m3)) + id(gas_counter_offset_m3);
+    update_interval: 1s
+
+  - platform: template
+    name: "Gas Durchfluss"
+    id: gas_flow_m3_h
+    internal: true
+    unit_of_measurement: "m³/h"
+    state_class: measurement
+    accuracy_decimals: 3
+    lambda: |-
+      if (id(gas_pulses_per_m3) <= 0.0f) {
+        return 0.0f;
+      }
+      return (id(gas_pulse_rate).state / id(gas_pulses_per_m3)) * 60.0f;
+    update_interval: 1s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: my_ip
+      name: "IP-Adresse"
+      internal: true
+
+binary_sensor:
+  - platform: status
+    id: esp_status
+    name: "ESP Status"
+    internal: true
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 11
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    lambda: |-
+      it.printf(0, 0, id(font_small), "IP:");
+      it.printf(0, 12, id(font_small), "%s",
+                id(my_ip).state.c_str());
+
+      it.printf(0, 36, id(font_small),
+                "Druck: %.2f bar",
+                id(pressure_bar).state);
+
+output:
+  - platform: gpio
+    pin: GPIO8
+    id: blue_led
+
+interval:
+  - interval: 1s
+    then:
+      - mqtt.publish_json:
+          topic: drucksensor/state
+          retain: true
+          payload: |-
+            root["esp_status"] = id(esp_status).state;
+            root["esp_temperature_c"] = id(esp_temperature).state;
+            root["ip_address"] = id(my_ip).state;
+            root["pressure_voltage_v"] = id(pressure_voltage).state;
+            root["pressure_bar"] = id(pressure_bar).state;
+            root["water_pulses_per_m3"] = id(water_pulses_per_m3);
+            root["water_counter_offset_m3"] = id(water_counter_offset_m3);
+            root["water_pulse_rate_imp_min"] = id(water_pulse_rate).state;
+            root["water_total_m3"] = id(water_total_m3).state;
+            root["water_flow_l_min"] = id(water_flow_l_min).state;
+            root["gas_pulses_per_m3"] = id(gas_pulses_per_m3);
+            root["gas_counter_offset_m3"] = id(gas_counter_offset_m3);
+            root["gas_pulse_rate_imp_min"] = id(gas_pulse_rate).state;
+            root["gas_total_m3"] = id(gas_total_m3).state;
+            root["gas_flow_m3_h"] = id(gas_flow_m3_h).state;
+            root["pressure_calibration_voltage_1_v"] = id(pressure_calibration_voltage_1);
+            root["pressure_calibration_bar_1"] = id(pressure_calibration_bar_1);
+            root["pressure_calibration_voltage_2_v"] = id(pressure_calibration_voltage_2);
+            root["pressure_calibration_bar_2"] = id(pressure_calibration_bar_2);
+      - if:
+          condition:
+            lambda: 'return id(pressure_bar).state > 0.1;'
+          then:
+            - output.turn_on: blue_led
+          else:
+            - output.turn_off: blue_led

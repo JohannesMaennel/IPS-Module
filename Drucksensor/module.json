@@ -1,0 +1,12 @@
+{
+    "id": "{CCB38F6C-A083-41E8-BAFF-FE1252B54A0F}",
+    "name": "Drucksensor",
+    "type": 3,
+    "vendor": "Johannes Maennel",
+    "aliases": ["Drucksensor"],
+    "parentRequirements": ["{A476EB74-5470-428A-87BC-E5E906303A6A}"],
+    "childRequirements": [],
+    "implemented": ["{1FB55D36-1964-45C4-89CA-3753FDE9EB39}"],
+    "prefix": "PRESSURE",
+    "url": ""
+}
