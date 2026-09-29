@@ -4,7 +4,7 @@
     "type": 3,
     "vendor": "Johannes Maennel",
     "aliases": ["Drucksensor"],
-    "parentRequirements": ["{A476EB74-5470-428A-87BC-E5E906303A6A}"],
+    "parentRequirements": ["{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}"],
     "childRequirements": [],
     "implemented": ["{1FB55D36-1964-45C4-89CA-3753FDE9EB39}"],
     "prefix": "PRESSURE",

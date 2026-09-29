@@ -5,14 +5,15 @@ declare(strict_types=1);
 class Drucksensor extends IPSModule
 {
     private const MQTT_SERVER_MODULE = '{C6D2AEB3-6E1F-4B2E-8E69-3A1A00246850}';
-    private const MQTT_RX_DATA_ID = '{1FB55D36-1964-45C4-89CA-3753FDE9EB39}';
-    private const MQTT_TX_DATA_ID = '{A476EB74-5470-428A-87BC-E5E906303A6A}';
+    private const MQTT_TX_DATA_ID = '{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}';
 
     public function Create()
     {
         parent::Create();
 
         $this->RegisterPropertyString('BaseTopic', 'drucksensor');
+        $this->RegisterPropertyBoolean('UseCustomSendTopic', false);
+        $this->RegisterPropertyString('SendTopic', 'drucksensor/cmd');
 
         $this->RegisterPropertyFloat('PressureCalibration1', 0.0000);
         $this->RegisterPropertyFloat('PressureCalibrationVoltage1', 0.3880);
@@ -112,6 +113,24 @@ class Drucksensor extends IPSModule
             'type' => 'ValidationTextBox',
             'name' => 'BaseTopic',
             'caption' => 'Basictopic'
+        ];
+
+        $elements[] = [
+            'type' => 'Label',
+            'caption' => 'Parent verbunden: ' . ($this->CanSendToParent() ? 'Ja' : 'Nein')
+        ];
+
+        $elements[] = [
+            'type' => 'CheckBox',
+            'name' => 'UseCustomSendTopic',
+            'caption' => 'Eigene Sendetopic verwenden?'
+        ];
+
+        $elements[] = [
+            'type' => 'ValidationTextBox',
+            'name' => 'SendTopic',
+            'caption' => 'Sendetopic',
+            'visible' => $this->ReadPropertyBoolean('UseCustomSendTopic')
         ];
 
         $elements[] = [
@@ -452,6 +471,11 @@ class Drucksensor extends IPSModule
             return;
         }
 
+        if (!$this->CanSendToParent()) {
+            $this->Debug('MQTT TX', 'Konfiguration nicht gesendet, da keine aktive MQTT-Parent-Instanz verbunden ist.', 0);
+            return;
+        }
+
         $payload = [
             'pressure_calibration_voltage_1' => $this->ReadPropertyFloat('PressureCalibrationVoltage1'),
             'pressure_calibration_bar_1' => $this->ReadPropertyFloat('PressureCalibration1'),
@@ -470,11 +494,16 @@ class Drucksensor extends IPSModule
             return;
         }
 
-        $this->PublishMQTT($baseTopic . '/cmd', $jsonPayload, false);
+        $this->PublishMQTT($this->GetSendTopic(), $jsonPayload, false);
     }
 
     private function PublishMQTT(string $topic, string $payload, bool $retain = false, int $qos = 0): void
     {
+        if (!$this->CanSendToParent()) {
+            $this->Debug('MQTT TX', 'Senden uebersprungen, da keine aktive MQTT-Parent-Instanz verbunden ist.', 0);
+            return;
+        }
+
         $data = [
             'DataID' => self::MQTT_TX_DATA_ID,
             'PacketType' => 3,
@@ -492,6 +521,11 @@ class Drucksensor extends IPSModule
 
         $this->Debug('MQTT TX', $json, 0);
         $this->SendDataToParent($json);
+    }
+
+    private function CanSendToParent(): bool
+    {
+        return $this->HasActiveParent();
     }
 
     private function UpdateReceiveDataFilter(): void
@@ -557,6 +591,25 @@ class Drucksensor extends IPSModule
     private function GetBaseTopic(): string
     {
         return trim($this->ReadPropertyString('BaseTopic'), "/ \t\n\r\0\x0B");
+    }
+
+    private function GetSendTopic(): string
+    {
+        if ($this->ReadPropertyBoolean('UseCustomSendTopic')) {
+            $customTopic = trim($this->ReadPropertyString('SendTopic'), "/ \t\n\r\0\x0B");
+
+            if ($customTopic !== '') {
+                return $customTopic;
+            }
+        }
+
+        $baseTopic = $this->GetBaseTopic();
+
+        if ($baseTopic === '') {
+            return 'cmd';
+        }
+
+        return $baseTopic . '/cmd';
     }
 
     private function BuildSummary(): string
