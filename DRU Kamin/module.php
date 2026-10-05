@@ -31,6 +31,8 @@ class DRUKamin extends IPSModule
         $this->RegisterAttributeInteger('StatusRegister', 0);
         $this->RegisterAttributeInteger('StatusUpdatedAt', 0);
         $this->RegisterAttributeInteger('WaveInterval', 10);
+        $this->RegisterAttributeInteger('WaveUpdatedAt', 0);
+        $this->RegisterAttributeInteger('WaveSyncAttemptAt', 0);
         $this->RegisterAttributeString(
             'WavePattern',
             json_encode(array_fill(0, self::WAVE_STAGE_COUNT, 50), JSON_THROW_ON_ERROR)
@@ -53,6 +55,8 @@ class DRUKamin extends IPSModule
 
         $this->SynchronizeVariables();
 
+        $this->WriteAttributeInteger('WaveUpdatedAt', 0);
+        $this->WriteAttributeInteger('WaveSyncAttemptAt', 0);
         $this->SetTimerInterval('PollStatus', 5000);
         $this->RefreshStatus();
     }
@@ -249,8 +253,11 @@ class DRUKamin extends IPSModule
                 'wave' => $this->ReadPropertyBoolean('EnableWave')
             ],
             'waveSettings' => [
+                'available' => $this->ReadPropertyBoolean('EnableWave')
+                    && $this->ReadAttributeInteger('WaveUpdatedAt') > 0
+                    && $this->HasActiveParent(),
                 'interval' => $this->ReadAttributeInteger('WaveInterval'),
-                'stages' => $this->ReadWavePattern()
+                'stages' => $this->ReadCachedWavePattern()
             ]
         ];
     }
@@ -412,6 +419,8 @@ class DRUKamin extends IPSModule
     {
         $this->actionFailed = false;
         if (!$this->HasActiveParent()) {
+            $this->WriteAttributeInteger('WaveUpdatedAt', 0);
+            $this->WriteAttributeInteger('WaveSyncAttemptAt', 0);
             $this->WriteAttributeInteger('StatusUpdatedAt', 0);
             $this->SetStatus(104);
             $this->LogError('Statusabfrage', 'Modbus-Gateway oder I/O nicht verbunden oder nicht aktiv.');
@@ -424,6 +433,7 @@ class DRUKamin extends IPSModule
             $this->SetStatus(201);
             return;
         }
+        $previousStatus = $this->ReadAttributeInteger('StatusRegister');
         $this->WriteAttributeInteger('StatusRegister', $status);
         $this->WriteAttributeInteger('StatusUpdatedAt', time());
         $this->RecordMainBurnerState(($status & (1 << 2)) !== 0);
@@ -438,6 +448,13 @@ class DRUKamin extends IPSModule
         );
         $this->SetStatus(102);
         $this->UpdateVisualization();
+
+        if ($this->ReadPropertyBoolean('EnableWave') && (
+            time() - $this->ReadAttributeInteger('WaveSyncAttemptAt') >= 60
+            || (($status & (1 << 9)) !== 0 && ($previousStatus & (1 << 9)) === 0)
+        )) {
+            $this->SynchronizeWaveSettings();
+        }
 
         if ($this->ReadPropertyBoolean('EnableTemperatureControl')) {
             $roomTemperatureRaw = $this->ReadRegister(40207);
@@ -706,6 +723,9 @@ class DRUKamin extends IPSModule
                 $this->WaitForStatusBit(9, true, 'Wave konnte nicht aktiviert werden.');
             }
         }
+        if ($mode === 'wave' && !$this->actionFailed) {
+            $this->WriteAttributeInteger('WaveSyncAttemptAt', 0);
+        }
     }
 
     private function WaitForTemperatureControl(bool $expected): bool
@@ -761,7 +781,6 @@ class DRUKamin extends IPSModule
             return;
         }
 
-        $percentages = [];
         $stageValues = [];
         foreach (array_values($settings['stages']) as $percentage) {
             if (!is_numeric($percentage) || (float) $percentage < 0 || (float) $percentage > 100) {
@@ -771,7 +790,6 @@ class DRUKamin extends IPSModule
             $percentage = (int) round((float) $percentage);
             $stage = (int) round($percentage * 14 / 100) + 1;
             $stageValues[] = $stage;
-            $percentages[] = (int) round(($stage - 1) * 100 / 14);
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
@@ -788,15 +806,53 @@ class DRUKamin extends IPSModule
             $registers[] = ($stageValues[$index + 1] << 8) | $stageValues[$index];
         }
         $this->WriteMultipleRegisters(self::WAVE_INTERVAL_REGISTER, $registers);
-        if ($this->actionFailed) {
-            return;
-        }
-
-        $this->WriteAttributeInteger('WaveInterval', (int) $interval);
-        $this->WriteAttributeString('WavePattern', json_encode($percentages, JSON_THROW_ON_ERROR));
+        $this->SynchronizeWaveSettings();
     }
 
-    private function ReadWavePattern(): array
+    private function SynchronizeWaveSettings(): void
+    {
+        // Read back even after a partial write, without losing its failure state.
+        $previousFailure = $this->actionFailed;
+        $this->actionFailed = false;
+        $this->WriteAttributeInteger('WaveUpdatedAt', 0);
+        $this->WriteAttributeInteger('WaveSyncAttemptAt', time());
+        try {
+            $interval = $this->ReadRegister(self::WAVE_INTERVAL_REGISTER);
+            if ($this->actionFailed) {
+                return;
+            }
+            $this->SendDebug('Wave Lesen', sprintf('Register 40420=%d (0x%04x)', $interval, $interval), 0);
+            if ($interval < 5 || $interval > 60) {
+                $this->LogError('Wave-Synchronisation', 'Register 40420 enthält ein nicht unterstütztes Intervall: ' . $interval . '.');
+                return;
+            }
+            $percentages = [];
+            for ($index = 0; $index < self::WAVE_STAGE_COUNT / 2; $index++) {
+                $register = self::WAVE_INTERVAL_REGISTER + 1 + $index;
+                $value = $this->ReadRegister($register);
+                if ($this->actionFailed) {
+                    return;
+                }
+                $low = $value & 0xff;
+                $high = ($value >> 8) & 0xff;
+                $this->SendDebug('Wave Lesen', sprintf('Register %d=%d (0x%04x), Stufen LSB=%d MSB=%d', $register, $value, $value, $low, $high), 0);
+                if ($low < 1 || $low > 15 || $high < 1 || $high > 15) {
+                    $this->LogError('Wave-Synchronisation', sprintf('Register %d enthält ungültige Wave-Stufen: 0x%04x (LSB=%d, MSB=%d).', $register, $value, $low, $high));
+                    return;
+                }
+                $percentages[] = (int) round(($low - 1) * 100 / 14);
+                $percentages[] = (int) round(($high - 1) * 100 / 14);
+            }
+            $this->WriteAttributeInteger('WaveInterval', $interval);
+            $this->WriteAttributeString('WavePattern', json_encode($percentages, JSON_THROW_ON_ERROR));
+            $this->WriteAttributeInteger('WaveUpdatedAt', time());
+            $this->SendDebug('Wave-Synchronisation', 'Intervall und 20 Stufen aus Register 40420–40430 übernommen.', 0);
+        } finally {
+            $this->actionFailed = $previousFailure || $this->actionFailed;
+        }
+    }
+
+    private function ReadCachedWavePattern(): array
     {
         $pattern = json_decode($this->ReadAttributeString('WavePattern'), true);
         if (!is_array($pattern) || count($pattern) !== self::WAVE_STAGE_COUNT) {

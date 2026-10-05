@@ -243,6 +243,14 @@
         heading.textContent = "Wave-Muster";
         editor.appendChild(heading);
 
+        if (waveSettings.available !== true) {
+            const notice = document.createElement("p");
+            notice.textContent = "Wave-Einstellungen konnten noch nicht gültig aus dem Kamin gelesen werden.";
+            editor.appendChild(notice);
+            controls.appendChild(editor);
+            return;
+        }
+
         const enabled = statusAvailable && mainBurnerOn && waveActive && !fault;
         const intervalLabel = document.createElement("label");
         intervalLabel.className = "interval-control";

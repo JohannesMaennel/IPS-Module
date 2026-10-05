@@ -56,16 +56,31 @@ Die elf Schreibtelegramme erfolgen nur beim expliziten Speichern, nicht beim
 Bewegen der Regler. Jeder Wert muss bestaetigt werden; beim ersten Fehler
 stoppt die Folge ohne Wiederholung. Bereits bestaetigte Register koennen
 dann am Geraet geaendert sein; der Teilfortschritt wird protokolliert.
-Die lokalen Wave-Einstellungen werden erst nach allen elf Bestaetigungen
-als gespeichert uebernommen. Der reale FC6-Wave-Schreibablauf muss noch am
-Geraet bestaetigt werden.
+Nach dem Schreibversuch werden die realen Register zurueckgelesen, auch
+nach Teilfehlern. Nur ein vollstaendiger, gueltiger Lesestand ersetzt die
+lokalen IPS-Daten. Das Schreiben von 40420 wurde am realen Geraet bestaetigt;
+40421 wurde auch mit FC6 und gueltigen gepackten Stufen mit
+ILLEGAL_DATA_VALUE abgelehnt. Die Ursache dieser Geraeteablehnung ist offen;
+Bytefolge oder Registeradressen werden nicht spekulativ geaendert.
+
+Bei aktivierter Installationsoption Wave liest das Modul 40420-40430 bei
+**Aenderungen uebernehmen**, bei Aktivierung/Anwahl von Wave, bei einer
+extern erkannten Wave-Aktivierung und zyklisch alle 60 Sekunden.
+Die Statusabfrage bleibt bei fuenf Sekunden. Pro Register werden zwei
+Stufen gelesen: zuerst LSB, dann MSB, Werte 1-15 werden auf 0-100 Prozent
+umgerechnet. Der Debug **Wave Lesen** zeigt die Rohwerte und beide Bytes.
+Bei unvollstaendigen oder ungueltigen Lesedaten zeigt die UI einen Hinweis
+statt eines editierbaren lokalen Ersatzmusters. Unveraenderte Lesedaten
+setzen noch nicht gespeicherte Reglerbewegungen nicht zurueck.
 
 Gateway-Warnungen (z.B. `ILLEGAL_DATA_VALUE`, Modbus-Exception 03) werden nur
 waehrend des synchronen `SendDataToParent()`-Aufrufs abgefangen und mit
 Funktionscode, Registeradresse, Registeranzahl und Datenhex protokolliert.
 Der vorherige PHP-Fehlerhandler wird auch nach Exceptions wiederhergestellt.
-Eine Warnung bedeutet einen fehlgeschlagenen Auftrag; Wave-Einstellungen
-werden dann nicht als gespeichert uebernommen. Es erfolgt kein automatischer
+Eine Warnung bedeutet einen fehlgeschlagenen Auftrag; angeforderte
+Wave-Einstellungen werden nicht als gespeichert ausgegeben. Ein anschliessender
+erfolgreicher Readback synchronisiert stattdessen den realen Geraetestand.
+Es erfolgt kein automatischer
 Wiederholungsversuch oder Wechsel zu anderen Schreibbefehlen.
 Bei einer Ablehnung die zugehoerigen Eintraege **Modbus TX**, **Modbus RX**
 und **Fehler** pruefen. Ohne diese Daten laesst sich nicht unterscheiden,

@@ -18,7 +18,7 @@ window.runDRUUiRegression = async function () {
             statusRegister,
             statusValidForMs: 15000,
             canSetFlameHeight: (statusRegister & 4) !== 0,
-            waveSettings: { interval: 10, stages: Array(20).fill(50) },
+            waveSettings: { available: true, interval: 10, stages: Array(20).fill(50) },
             ...overrides
         }));
     };
@@ -41,6 +41,24 @@ window.runDRUUiRegression = async function () {
 
         push(12, { Fireplace: true, SecondBurner: false });
         check([...controls.querySelectorAll("button")].some(button => button.textContent === "Zweiter Brenner: Ein"), "Second burner state follows bit 3");
+        push(516, { Fireplace: true, Wave: true }, {
+            waveSettings: { available: true, interval: 25, stages: Array.from({ length: 20 }, (_, index) => index * 5) }
+        });
+        check(controls.querySelector(".interval-control input").value === "25"
+            && controls.querySelectorAll(".wave-slider").length === 20
+            && controls.querySelectorAll(".wave-slider")[19].value === "95", "Wave editor uses synchronized device interval and stages");
+        const waveSlider = controls.querySelector(".wave-slider");
+        waveSlider.value = "75";
+        waveSlider.dispatchEvent(new Event("input"));
+        push(516, { Fireplace: true, Wave: true }, {
+            waveSettings: { available: true, interval: 25, stages: Array.from({ length: 20 }, (_, index) => index * 5) }
+        });
+        check(controls.querySelector(".wave-slider") === waveSlider && waveSlider.value === "75", "Unchanged readback preserves unsaved slider edits");
+        push(516, { Fireplace: true, Wave: true }, {
+            waveSettings: { available: false, interval: 25, stages: Array(20).fill(50) }
+        });
+        check(!controls.querySelector(".wave-slider") && !controls.querySelector(".wave-save")
+            && controls.textContent.includes("aus dem Kamin gelesen"), "Unavailable device pattern is not presented as editable cached data");
         push(12, { Fireplace: true, SecondBurner: true }, { statusAvailable: false, statusValidForMs: 0 });
         check(controls.querySelector("button").textContent === "Hauptbrenner: Unbekannt" && controls.querySelector("button").disabled, "Read failure shows unknown state and disables actions");
 

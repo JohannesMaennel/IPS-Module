@@ -52,6 +52,8 @@ class IPSModule
     public bool $parentThrows = false;
     public int $rawStatus = 0;
     public array $statusQueue = [];
+    public array $registerValues = [40420 => 10];
+    public ?int $failedReadRegister = null;
     public array $properties = [];
     public array $attributes = [];
     public array $timers = [];
@@ -64,6 +66,9 @@ class IPSModule
     public function __construct() {
         $this->InstanceID = ++$GLOBALS['nextId'];
         $GLOBALS['modules'][$this->InstanceID] = $this;
+        foreach (range(40421, 40430) as $register) {
+            $this->registerValues[$register] = 0x0808;
+        }
     }
     public function Create() {}
     public function ApplyChanges() {}
@@ -114,13 +119,13 @@ class IPSModule
             throw new RuntimeException('Gateway transport exception');
         }
         if ($request['Function'] === 3) {
-            if ($this->readFails) {
+            if ($this->readFails || $this->failedReadRegister === $request['Address']) {
                 return false;
             }
             if ($this->malformedResponse) {
                 return "\x83\x02\x00\x00";
             }
-            $value = 200;
+            $value = $this->registerValues[$request['Address']] ?? 200;
             if ($request['Address'] === 40203) {
                 $value = count($this->statusQueue) > 0 ? array_shift($this->statusQueue) : $this->rawStatus;
             }
@@ -140,6 +145,7 @@ class IPSModule
             throw new RuntimeException('Gateway requires two binary bytes per register, not hex text');
         }
         if ($request['Function'] === 6) {
+            $this->registerValues[$request['Address']] = unpack('nvalue', $data)['value'];
             return pack('Cn', 6, $request['Address']) . $data;
         }
         return pack('Cnn', 16, $request['Address'], $request['Quantity']);
@@ -357,6 +363,7 @@ try {
     $module->warningFunction = 6;
     $module->rawStatus = (1 << 2) | (1 << 9);
     $module->properties['EnableWave'] = true;
+    $module->RequestAction('PollStatus', true);
     $beforeInterval = $module->attributes['WaveInterval'];
     $beforePattern = $module->attributes['WavePattern'];
     $module->RequestAction('SaveWaveSettings', json_encode(['interval' => 30, 'stages' => array_fill(0, 20, 100)]));
@@ -395,5 +402,87 @@ try {
 } finally {
     restore_error_handler();
 }
+
+$syncModule = new DRUKamin();
+$syncModule->Create();
+$syncModule->properties['EnableWave'] = true;
+$syncModule->registerValues[40420] = 17;
+$syncModule->registerValues[40421] = 0x0f01;
+$syncModule->ApplyChanges();
+check(payload($syncModule)['waveSettings']['available']
+    && payload($syncModule)['waveSettings']['interval'] === 17
+    && array_slice(payload($syncModule)['waveSettings']['stages'], 0, 2) === [0, 100],
+    'ApplyChanges reads actual Wave interval and decodes LSB before MSB');
+$syncModule->requests = [];
+$syncModule->RequestAction('PollStatus', true);
+check(count($syncModule->requests) === 1, 'Five-second status poll does not repeatedly read Wave registers');
+$syncModule->attributes['WaveSyncAttemptAt'] = time() - 60;
+$syncModule->registerValues[40420] = 22;
+$syncModule->RequestAction('PollStatus', true);
+check(payload($syncModule)['waveSettings']['interval'] === 22, 'Periodic Wave sync detects external settings changes');
+$syncModule->registerValues[40420] = 23;
+$syncModule->rawStatus = 516;
+$syncModule->RequestAction('PollStatus', true);
+check(payload($syncModule)['waveSettings']['interval'] === 23, 'External Wave activation triggers immediate register synchronization');
+$syncModule->registerValues[40420] = 24;
+$syncModule->RequestAction('OperationMode', 'wave');
+check(payload($syncModule)['waveSettings']['interval'] === 24, 'Selecting already-active Wave synchronizes device settings');
+$syncModule->attributes['StatusRegister'] = 4;
+$syncModule->statusQueue = [4, 516, 516];
+$syncModule->registerValues[40420] = 26;
+$syncModule->requests = [];
+$syncModule->RequestAction('OperationMode', 'wave');
+check(commands($syncModule) === [105] && payload($syncModule)['waveSettings']['interval'] === 26,
+    'Wave command activation reads the device pattern after status confirmation');
+
+$syncModule->failedReadRegister = 40425;
+$syncModule->attributes['WaveSyncAttemptAt'] = 0;
+$oldPattern = $syncModule->attributes['WavePattern'];
+$oldInterval = $syncModule->attributes['WaveInterval'];
+$syncModule->registerValues[40420] = 25;
+$syncModule->RequestAction('PollStatus', true);
+check(!payload($syncModule)['waveSettings']['available']
+    && $syncModule->attributes['WavePattern'] === $oldPattern && $syncModule->attributes['WaveInterval'] === $oldInterval
+    && payload($syncModule)['statusAvailable'],
+    'Incomplete Wave read does not overwrite cache or invalidate confirmed burner state');
+$syncModule->failedReadRegister = null;
+$syncModule->attributes['WaveSyncAttemptAt'] = 0;
+$syncModule->registerValues[40421] = 0x0800;
+$syncModule->RequestAction('PollStatus', true);
+check(!payload($syncModule)['waveSettings']['available'] && str_contains($logs[count($logs) - 1][1], '0x0800'),
+    'Invalid raw stage values are logged and never substituted by defaults');
+$syncModule->registerValues[40421] = 0x0f01;
+$syncModule->attributes['WaveSyncAttemptAt'] = 0;
+$syncModule->registerValues[40420] = 0;
+$syncModule->RequestAction('PollStatus', true);
+check(!payload($syncModule)['waveSettings']['available'], 'Invalid device interval disables Wave editor');
+$syncModule->registerValues[40420] = 10;
+$syncModule->attributes['WaveSyncAttemptAt'] = 0;
+$syncModule->RequestAction('PollStatus', true);
+check(payload($syncModule)['waveSettings']['available'], 'Wave sync recovers after valid register reads');
+$failed->setValue($syncModule, true);
+(new ReflectionMethod(DRUKamin::class, 'SynchronizeWaveSettings'))->invoke($syncModule);
+check($failed->getValue($syncModule) && $syncModule->attributes['WaveUpdatedAt'] > 0,
+    'Successful readback preserves a preceding write failure');
+
+$syncModule->writeResponseQueue = [pack('Cnn', 6, 40420, 30), false];
+// The acknowledged first write changes the device; the second is rejected.
+$syncModule->registerValues[40420] = 30;
+$syncModule->requests = [];
+$syncModule->RequestAction('SaveWaveSettings', json_encode(['interval' => 30, 'stages' => array_fill(0, 20, 100)]));
+check(payload($syncModule)['waveSettings']['interval'] === 30
+    && array_slice(payload($syncModule)['waveSettings']['stages'], 0, 2) === [0, 100]
+    && count(array_filter($syncModule->requests, static fn (array $request): bool => $request['Function'] === 6)) === 2,
+    'Partial write reads back actual device interval and original pattern without further writes');
+check(count(array_filter($syncModule->debug, static fn (array $entry): bool => $entry[0] === 'Wave Lesen')) > 0,
+    'Wave readback logs raw register values for hardware diagnosis');
+$syncModule->connection = 0;
+$syncModule->RequestAction('PollStatus', true);
+check(!payload($syncModule)['waveSettings']['available'], 'Disconnect invalidates Wave readback');
+$syncModule->connection = 42;
+$syncModule->registerValues[40420] = 35;
+$syncModule->RequestAction('PollStatus', true);
+check(payload($syncModule)['waveSettings']['available'] && payload($syncModule)['waveSettings']['interval'] === 35,
+    'Reconnect reloads device Wave settings');
 
 echo 'All DRU regression checks passed.' . PHP_EOL;
