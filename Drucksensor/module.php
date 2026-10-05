@@ -6,6 +6,16 @@ class Drucksensor extends IPSModule
 {
     private const MQTT_SERVER_MODULE = '{C6D2AEB3-6E1F-4B2E-8E69-3A1A00246850}';
     private const MQTT_TX_DATA_ID = '{043EA491-0325-4ADD-8FC2-A30C8EEB4D3F}';
+    private const CONFIGURATION_FIELDS = [
+        'PressureCalibrationVoltage1' => ['pressure_calibration_voltage_1', 'pressure_calibration_voltage_1_v'],
+        'PressureCalibration1' => ['pressure_calibration_bar_1', 'pressure_calibration_bar_1'],
+        'PressureCalibrationVoltage2' => ['pressure_calibration_voltage_2', 'pressure_calibration_voltage_2_v'],
+        'PressureCalibration2' => ['pressure_calibration_bar_2', 'pressure_calibration_bar_2'],
+        'GasCounterOffsetM3' => ['gas_counter_offset_m3', 'gas_counter_offset_m3'],
+        'GasPulsesPerM3' => ['gas_pulses_per_m3', 'gas_pulses_per_m3'],
+        'WaterCounterOffsetM3' => ['water_counter_offset_m3', 'water_counter_offset_m3'],
+        'WaterPulsesPerM3' => ['water_pulses_per_m3', 'water_pulses_per_m3']
+    ];
 
     public function Create()
     {
@@ -30,6 +40,8 @@ class Drucksensor extends IPSModule
         $this->RegisterPropertyBoolean('DebugEnabled', false);
 
         $this->RegisterAttributeString('LastState', '');
+        $this->RegisterAttributeString('PendingConfiguration', '');
+        $this->RegisterAttributeBoolean('SynchronizingConfiguration', false);
 
         $this->ConnectParent(self::MQTT_SERVER_MODULE);
     }
@@ -44,7 +56,9 @@ class Drucksensor extends IPSModule
         $this->RefreshFromLastState();
         $this->UpdateReceiveDataFilter();
         $this->SetSummary($this->BuildSummary());
-        $this->SendConfiguration();
+        if (!$this->ReadAttributeBoolean('SynchronizingConfiguration')) {
+            $this->SendConfiguration();
+        }
     }
 
     public function RequestAction($Ident, $Value)
@@ -88,11 +102,15 @@ class Drucksensor extends IPSModule
             }
 
             $this->ProcessState($state);
+            $this->SynchronizeConfiguration($state);
             return '';
         }
 
         if ($topic === $baseTopic . '/status') {
             $this->UpdateOnlineStatus($payload === 'online');
+            if ($payload === 'online' && $this->ReadAttributeString('PendingConfiguration') !== '') {
+                $this->SendConfiguration();
+            }
             return '';
         }
 
@@ -414,6 +432,66 @@ class Drucksensor extends IPSModule
         }
     }
 
+    private function SynchronizeConfiguration(array $state): void
+    {
+        $pending = json_decode($this->ReadAttributeString('PendingConfiguration'), true);
+
+        if (is_array($pending)) {
+            foreach (self::CONFIGURATION_FIELDS as $fields) {
+                [$commandKey, $stateKey] = $fields;
+
+                if (!isset($state[$stateKey]) || !is_numeric($state[$stateKey])) {
+                    return;
+                }
+
+                $expected = (float) $pending[$commandKey];
+                $tolerance = max(0.00005, abs($expected) * 0.0000001);
+
+                if (abs((float) $state[$stateKey] - $expected) > $tolerance) {
+                    return;
+                }
+            }
+
+            $this->WriteAttributeString('PendingConfiguration', '');
+        }
+
+        $changes = [];
+
+        foreach (self::CONFIGURATION_FIELDS as $property => $fields) {
+            $stateKey = $fields[1];
+
+            if (!isset($state[$stateKey]) || !is_numeric($state[$stateKey])) {
+                continue;
+            }
+
+            $value = round((float) $state[$stateKey], 4);
+            $minimum = in_array($property, ['GasPulsesPerM3', 'WaterPulsesPerM3'], true) ? 1.0 : 0.0;
+
+            if (!is_finite($value) || $value < $minimum || $this->ReadPropertyFloat($property) === $value) {
+                continue;
+            }
+
+            $changes[$property] = $value;
+        }
+
+        if ($changes === []) {
+            return;
+        }
+
+        $this->WriteAttributeBoolean('SynchronizingConfiguration', true);
+
+        try {
+            foreach ($changes as $property => $value) {
+                IPS_SetProperty($this->InstanceID, $property, $value);
+                $this->UpdateFormField($property, 'value', $value);
+            }
+
+            IPS_ApplyChanges($this->InstanceID);
+        } finally {
+            $this->WriteAttributeBoolean('SynchronizingConfiguration', false);
+        }
+    }
+
     private function NormalizeStateValue(array $definition, $value)
     {
         switch ($definition['type']) {
@@ -471,21 +549,12 @@ class Drucksensor extends IPSModule
             return;
         }
 
-        if (!$this->CanSendToParent()) {
-            $this->Debug('MQTT TX', 'Konfiguration nicht gesendet, da keine aktive MQTT-Parent-Instanz verbunden ist.', 0);
-            return;
-        }
+        $payload = [];
 
-        $payload = [
-            'pressure_calibration_voltage_1' => $this->ReadPropertyFloat('PressureCalibrationVoltage1'),
-            'pressure_calibration_bar_1' => $this->ReadPropertyFloat('PressureCalibration1'),
-            'pressure_calibration_voltage_2' => $this->ReadPropertyFloat('PressureCalibrationVoltage2'),
-            'pressure_calibration_bar_2' => $this->ReadPropertyFloat('PressureCalibration2'),
-            'gas_counter_offset_m3' => $this->ReadPropertyFloat('GasCounterOffsetM3'),
-            'gas_pulses_per_m3' => $this->ReadPropertyFloat('GasPulsesPerM3'),
-            'water_counter_offset_m3' => $this->ReadPropertyFloat('WaterCounterOffsetM3'),
-            'water_pulses_per_m3' => $this->ReadPropertyFloat('WaterPulsesPerM3')
-        ];
+        foreach (self::CONFIGURATION_FIELDS as $property => $fields) {
+            $minimum = in_array($property, ['GasPulsesPerM3', 'WaterPulsesPerM3'], true) ? 1.0 : 0.0;
+            $payload[$fields[0]] = max($minimum, $this->ReadPropertyFloat($property));
+        }
 
         $jsonPayload = json_encode($payload);
 
@@ -494,6 +563,7 @@ class Drucksensor extends IPSModule
             return;
         }
 
+        $this->WriteAttributeString('PendingConfiguration', $jsonPayload);
         $this->PublishMQTT($this->GetSendTopic(), $jsonPayload, false);
     }
 
