@@ -1,9 +1,9 @@
 {
     "id": "{576F8C8F-3B9A-4C6D-BF12-9A87F6C5B8D2}",
-    "name": "DRU_Kamin",
+    "name": "DRU Kamin",
     "type": 3,
     "vendor": "Johannes Maennel",
-    "aliases": ["DRU_Kamin"],
+    "aliases": ["DRU Kamin"],
     "parentRequirements": ["{E310B701-4AE7-458E-B618-EC13A1A6F6A8}"],
     "childRequirements": [],
     "implemented": ["{77B31ABB-18FA-4B91-BB63-E5B2AB5588F4}"],
