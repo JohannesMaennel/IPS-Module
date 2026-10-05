@@ -76,22 +76,25 @@ class Drucksensor extends IPSModule
         $data = json_decode($JSONString, true);
 
         if (!is_array($data)) {
+            $this->Debug('MQTT RX Fehler', 'Ungueltige MQTT-Nachricht: ' . json_last_error_msg(), 0);
             return '';
         }
 
         $topic = (string) ($data['Topic'] ?? '');
         $payload = $data['Payload'] ?? null;
         $baseTopic = $this->GetBaseTopic();
+        $this->Debug('MQTT RX Topic', $topic . ' (erwartet: ' . $baseTopic . '/state oder /status)', 0);
 
         if ($topic === '' || $baseTopic === '') {
             return '';
         }
 
         if ($topic === $baseTopic . '/state') {
+            $this->Debug('MQTT RX State', is_string($payload) ? $payload : (string) json_encode($payload), 0);
             $state = $this->DecodePayloadToArray($payload);
 
             if ($state === null) {
-                $this->Debug('ReceiveData', 'State-Payload ist kein gueltiges JSON.', 0);
+                $this->Debug('MQTT RX Fehler', 'State-Payload ist kein gueltiges JSON-Objekt: ' . json_last_error_msg(), 0);
                 return '';
             }
 
@@ -414,6 +417,8 @@ class Drucksensor extends IPSModule
 
     private function ProcessState(array $state): void
     {
+        $updatedVariables = 0;
+
         foreach ($this->GetVariableDefinitions() as $definition) {
             $key = $definition['key'];
 
@@ -424,12 +429,16 @@ class Drucksensor extends IPSModule
             $variableID = @$this->GetIDForIdent($definition['ident']);
 
             if ($variableID === false) {
+                $this->Debug('State Variable fehlt', $definition['ident'], 0);
                 continue;
             }
 
             $normalizedValue = $this->NormalizeStateValue($definition, $state[$key]);
             $this->WriteTypedValue($variableID, $definition['type'], $normalizedValue);
+            $updatedVariables++;
         }
+
+        $this->Debug('State verarbeitet', $updatedVariables . ' Variablen gesetzt; empfangene Felder: ' . implode(', ', array_keys($state)), 0);
     }
 
     private function SynchronizeConfiguration(array $state): void
@@ -602,7 +611,7 @@ class Drucksensor extends IPSModule
     {
         $baseTopic = $this->GetBaseTopic();
 
-        if ($baseTopic === '') {
+        if ($baseTopic === '' || $this->ReadPropertyBoolean('DebugEnabled')) {
             $this->SetReceiveDataFilter('.*');
             return;
         }
