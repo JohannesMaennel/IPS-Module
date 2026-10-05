@@ -986,42 +986,66 @@ class DRUKamin extends IPSModule
 
     private function WriteRegister(int $register, int $value): bool
     {
-        $this->SendDebug('Modbus TX', sprintf('FC6 Register=%d Wert=%d Daten=%s', $register, $value, bin2hex(pack('n', $value))), 0);
+        if ($register < 0 || $register > 65535 || $value < 0 || $value > 65535) {
+            $this->LogError('Modbus-Schreiben', 'Ungültige Registeradresse oder ungültiger Wert: ' . $register . ', ' . $value . '.');
+            return false;
+        }
+
+        $data = pack('n', $value);
+        $this->SendDebug('Modbus TX', sprintf('FC6 Register=%d Wert=%d Daten=%s', $register, $value, bin2hex($data)), 0);
         $response = $this->SendDataToParent(json_encode([
             'DataID' => self::MODBUS_GATEWAY_DATA_ID,
             'Function' => 6,
             'Address' => $register,
             'Quantity' => 1,
-            'Data' => bin2hex(pack('n', $value))
+            // The gateway expects bytes transported as Latin-1 characters in JSON, not hex text.
+            'Data' => mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1')
         ], JSON_THROW_ON_ERROR));
 
-        $this->SendDebug('Modbus RX', is_string($response) ? bin2hex($response) : get_debug_type($response), 0);
-        if ($response === false || $response === null || $response === '') {
-            $this->LogError('Modbus-Schreiben', 'Keine gültige Antwort für Register ' . $register . ', Wert ' . $value . '.');
-            return false;
-        }
-
-        return true;
+        return $this->ValidateWriteResponse($response, pack('Cnn', 6, $register, $value), 'Modbus-Schreiben');
     }
 
     private function WriteMultipleRegisters(int $register, array $values): void
     {
-        if (count($values) === 0 || count($values) > 123) {
-            $this->LogError('Modbus-Sammelschreiben', 'Ungültige Anzahl Register: ' . count($values) . '.');
+        $quantity = count($values);
+        if ($quantity === 0 || $quantity > 123 || $register < 0 || $register + $quantity - 1 > 65535) {
+            $this->LogError('Modbus-Sammelschreiben', 'Ungültiger Registerbereich: ' . $register . ', Anzahl ' . $quantity . '.');
             return;
         }
+        foreach ($values as $value) {
+            if (!is_int($value) || $value < 0 || $value > 65535) {
+                $this->LogError('Modbus-Sammelschreiben', 'Registerwerte müssen Ganzzahlen zwischen 0 und 65535 sein.');
+                return;
+            }
+        }
 
+        $data = pack('n*', ...$values);
+        $this->SendDebug('Modbus TX', sprintf('FC16 Register=%d Anzahl=%d Daten=%s', $register, $quantity, bin2hex($data)), 0);
         $response = $this->SendDataToParent(json_encode([
             'DataID' => self::MODBUS_GATEWAY_DATA_ID,
             'Function' => 16,
             'Address' => $register,
-            'Quantity' => count($values),
-            'Data' => bin2hex(pack('n*', ...$values))
+            'Quantity' => $quantity,
+            'Data' => mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1')
         ], JSON_THROW_ON_ERROR));
 
-        if ($response === false) {
-            $this->LogError('Modbus-Sammelschreiben', 'Wave-Einstellungen konnten nicht übertragen werden.');
+        $this->ValidateWriteResponse($response, pack('Cnn', 16, $register, $quantity), 'Modbus-Sammelschreiben');
+    }
+
+    private function ValidateWriteResponse(mixed $response, string $expected, string $context): bool
+    {
+        $actual = is_string($response) ? bin2hex($response) : get_debug_type($response);
+        $this->SendDebug('Modbus RX', $actual, 0);
+        if (is_string($response) && strlen($response) === 2 && ord($response[0]) === (ord($expected[0]) | 0x80)) {
+            $this->LogError($context, sprintf('Modbus-Exception %d; Antwort=%s, erwartet=%s.', ord($response[1]), $actual, bin2hex($expected)));
+            return false;
         }
+        if ($response !== $expected) {
+            $this->LogError($context, 'Ungültige Schreibbestätigung: Antwort=' . $actual . ', erwartet=' . bin2hex($expected) . '.');
+            return false;
+        }
+
+        return true;
     }
 
     private function LogError(string $context, Throwable|string $error): void

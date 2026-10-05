@@ -40,6 +40,15 @@ Statusrueckmeldungen und fuer FC6-Schreibbefehle auch TX-Daten und die
 hexadezimale Gateway-Antwort. Ein Zuend-Timeout ist kein Erfolgsnachweis:
 Die tatsaechliche Reaktion des Kamins muss am Geraet geprueft werden.
 
+FC6 und FC16 senden binaere Big-Endian-Registerwerte, fuer den JSON-Transport
+mit `mb_convert_encoding()` von ISO-8859-1 nach UTF-8 kodiert, keinen Hextext.
+Hex wird nur im Debug angezeigt. FC6 muss Funktionscode, Adresse und Wert
+exakt bestaetigen; FC16 muss Funktionscode, Startadresse und Registeranzahl
+bestaetigen. Abweichungen und Modbus-Exceptions werden protokolliert und
+brechen die abhaengige Aktion ab. Fuer Register 40200 und Kommando 101
+lautet die erwartete FC6-Antwort `069d080065`. `069d083030` bestaetigt dagegen
+den falschen Wert 0x3030 (ASCII "00") und wird nicht als Erfolg akzeptiert.
+
 ## Regressionstests
 
 Ohne laufenden Symcon-Kernel:
@@ -51,7 +60,10 @@ php -n ".\DRU Kamin\tests\regression.php"
 Der Test simuliert die IPS-Schnittstellen, einschliesslich einer ausschliesslich
 String-basierten `UpdateVisualizationValue()`-Signatur. Er prueft Lifecycle,
 Timer, externe Statusaenderungen, Verbindungsverlust und Wiederherstellung,
-Optionen und Brennerbefehle. Er ersetzt keinen Hardwaretest.
+Optionen und Brennerbefehle sowie binaere FC6-/FC16-Daten und deren
+Schreibbestaetigungen. PHP benoetigt die in Symcon vorhandene Erweiterung
+`mbstring`; bei einer portablen CLI diese ebenfalls aktivieren.
+Er ersetzt keinen Hardwaretest.
 
 Die Browserregression in `tests/ui-regression.js` wird nach `UI/app.js`
 in einer Testseite mit `druData`, `controls`, `connectionStatus` und

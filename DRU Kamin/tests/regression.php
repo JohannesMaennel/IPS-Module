@@ -44,6 +44,8 @@ class IPSModule
     public bool $readFails = false;
     public bool $malformedResponse = false;
     public bool $writeFails = false;
+    public bool $overrideWriteResponse = false;
+    public mixed $writeResponse = null;
     public int $rawStatus = 0;
     public array $statusQueue = [];
     public array $properties = [];
@@ -113,7 +115,17 @@ class IPSModule
         if ($this->writeFails) {
             return false;
         }
-        return pack('Cnn', $request['Function'], $request['Address'], hexdec($request['Data']));
+        if ($this->overrideWriteResponse) {
+            return $this->writeResponse;
+        }
+        $data = mb_convert_encoding($request['Data'], 'ISO-8859-1', 'UTF-8');
+        if (strlen($data) !== $request['Quantity'] * 2) {
+            throw new RuntimeException('Gateway requires two binary bytes per register, not hex text');
+        }
+        if ($request['Function'] === 6) {
+            return pack('Cn', 6, $request['Address']) . $data;
+        }
+        return pack('Cnn', 16, $request['Address'], $request['Quantity']);
     }
 }
 
@@ -128,7 +140,7 @@ function check(bool $condition, string $description): void {
 function payload(DRUKamin $module): array { return $module->messages[count($module->messages) - 1]; }
 function commands(DRUKamin $module): array {
     return array_map(
-        static fn (array $request): int => hexdec($request['Data']),
+        static fn (array $request): int => unpack('nvalue', mb_convert_encoding($request['Data'], 'ISO-8859-1', 'UTF-8'))['value'],
         array_values(array_filter($module->requests, static fn (array $request): bool => $request['Function'] === 6 && $request['Address'] === 40200))
     );
 }
@@ -207,5 +219,77 @@ $module->statusQueue = [12, 0, 0];
 $module->requests = [];
 $module->RequestAction('Fireplace', false);
 check(commands($module) === [3], 'Main burner OFF does not separately send command 4');
+
+$writeRegister = new ReflectionMethod(DRUKamin::class, 'WriteRegister');
+$writeMultiple = new ReflectionMethod(DRUKamin::class, 'WriteMultipleRegisters');
+$failed = new ReflectionProperty(DRUKamin::class, 'actionFailed');
+foreach ([0, 101, 0x80ff, 65535] as $value) {
+    $failed->setValue($module, false);
+    check($writeRegister->invoke($module, 40200, $value) && !$failed->getValue($module), 'FC6 binary roundtrip including high bytes: ' . $value);
+}
+
+$module->overrideWriteResponse = true;
+foreach ([
+    'observed ASCII echo' => hex2bin('069d083030'),
+    'wrong address' => pack('Cnn', 6, 40201, 101),
+    'wrong function' => pack('Cnn', 16, 40200, 101),
+    'truncated echo' => hex2bin('069d0800'),
+    'extra byte' => hex2bin('069d08006500'),
+    'Modbus exception' => hex2bin('8602'),
+    'empty response' => '',
+    'boolean response' => true,
+    'null response' => null
+] as $description => $response) {
+    $module->writeResponse = $response;
+    $failed->setValue($module, false);
+    $logCount = count($logs);
+    check(!$writeRegister->invoke($module, 40200, 101) && $failed->getValue($module) && count($logs) > $logCount, 'FC6 rejects and logs ' . $description);
+}
+check(str_contains($logs[count($logs) - 1][1], 'erwartet=069d080065'), 'FC6 error log includes expected echo');
+
+$module->writeResponse = hex2bin('069d083030');
+$module->rawStatus = 0;
+$module->requests = [];
+$logCount = count($logs);
+$module->RequestAction('Fireplace', true);
+$actionLogs = array_slice($logs, $logCount);
+check(
+    commands($module) === [101]
+    && !array_filter($actionLogs, static fn (array $log): bool => str_contains($log[1], 'Warte auf Hauptbrenner')),
+    'Mismatched echo aborts ignition before waiting for burner status'
+);
+
+$module->overrideWriteResponse = false;
+$failed->setValue($module, false);
+$waveRegisters = array_merge([60], array_fill(0, 10, 0x0f01));
+$writeMultiple->invoke($module, 40420, $waveRegisters);
+$request = $module->requests[count($module->requests) - 1];
+check(
+    !$failed->getValue($module) && $request['Quantity'] === 11
+    && mb_convert_encoding($request['Data'], 'ISO-8859-1', 'UTF-8') === pack('n*', ...$waveRegisters),
+    'FC16 sends exact binary Wave payload and validates register count'
+);
+$module->overrideWriteResponse = true;
+foreach ([pack('Cnn', 16, 40420, 10), pack('Cnn', 16, 40421, 11), hex2bin('9003'), false] as $response) {
+    $module->writeResponse = $response;
+    $failed->setValue($module, false);
+    $writeMultiple->invoke($module, 40420, $waveRegisters);
+    check($failed->getValue($module), 'FC16 rejects invalid echo: ' . (is_string($response) ? bin2hex($response) : 'false'));
+}
+$module->overrideWriteResponse = false;
+foreach ([[-1, 101], [65536, 101], [40200, -1], [40200, 65536]] as [$register, $value]) {
+    $failed->setValue($module, false);
+    $requestCount = count($module->requests);
+    check(
+        !$writeRegister->invoke($module, $register, $value) && $failed->getValue($module) && count($module->requests) === $requestCount,
+        'FC6 rejects out-of-range input without sending'
+    );
+}
+foreach ([[65535, [1, 2]], [40420, [65536]], [40420, ['1']], [40420, []], [40420, array_fill(0, 124, 1)]] as [$register, $values]) {
+    $failed->setValue($module, false);
+    $requestCount = count($module->requests);
+    $writeMultiple->invoke($module, $register, $values);
+    check($failed->getValue($module) && count($module->requests) === $requestCount, 'FC16 rejects invalid range or values without sending');
+}
 
 echo 'All DRU regression checks passed.' . PHP_EOL;
