@@ -953,13 +953,10 @@ class DRUKamin extends IPSModule
     private function ReadRegister(int $register): int
     {
         // DRU expects the documented register number as-is, not a 40001-relative offset.
-        $response = $this->SendDataToParent(json_encode([
-            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
-            'Function' => 3,
-            'Address' => $register,
-            'Quantity' => 1,
-            'Data' => ''
-        ], JSON_THROW_ON_ERROR));
+        $response = $this->SendModbusRequest(3, $register, 1, '', 'Modbus-Lesen');
+        if ($this->actionFailed) {
+            return -1;
+        }
 
         if (!is_string($response) || $response === '') {
             $this->LogError('Modbus-Lesen', 'Keine gültige Antwort für Register ' . $register . '.');
@@ -993,14 +990,10 @@ class DRUKamin extends IPSModule
 
         $data = pack('n', $value);
         $this->SendDebug('Modbus TX', sprintf('FC6 Register=%d Wert=%d Daten=%s', $register, $value, bin2hex($data)), 0);
-        $response = $this->SendDataToParent(json_encode([
-            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
-            'Function' => 6,
-            'Address' => $register,
-            'Quantity' => 1,
-            // The gateway expects bytes transported as Latin-1 characters in JSON, not hex text.
-            'Data' => mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1')
-        ], JSON_THROW_ON_ERROR));
+        $response = $this->SendModbusRequest(6, $register, 1, $data, 'Modbus-Schreiben');
+        if ($this->actionFailed) {
+            return false;
+        }
 
         return $this->ValidateWriteResponse($response, pack('Cnn', 6, $register, $value), 'Modbus-Schreiben');
     }
@@ -1020,21 +1013,71 @@ class DRUKamin extends IPSModule
         }
 
         $data = pack('n*', ...$values);
-        $this->SendDebug('Modbus TX', sprintf('FC16 Register=%d Anzahl=%d Daten=%s', $register, $quantity, bin2hex($data)), 0);
-        $response = $this->SendDataToParent(json_encode([
+        $this->SendDebug('Modbus Schreibfolge', sprintf('FC6 Startregister=%d Anzahl=%d Daten=%s', $register, $quantity, bin2hex($data)), 0);
+        foreach (array_values($values) as $index => $value) {
+            if (!$this->WriteRegister($register + $index, $value)) {
+                $this->LogError(
+                    'Modbus-Sammelschreiben',
+                    sprintf(
+                        'Schreibfolge bei Register %d abgebrochen; %d von %d Registern bereits bestätigt. Das Gerät kann teilweise geänderte Wave-Einstellungen enthalten; Einstellungen wurden nicht als gespeichert übernommen.',
+                        $register + $index,
+                        $index,
+                        $quantity
+                    )
+                );
+                return;
+            }
+            $this->SendDebug('Modbus Schreibfolge', sprintf('Register %d bestätigt (%d/%d)', $register + $index, $index + 1, $quantity), 0);
+        }
+    }
+
+    private function SendModbusRequest(int $function, int $register, int $quantity, string $data, string $context): mixed
+    {
+        $details = sprintf('FC%d Register=%d Anzahl=%d Daten=%s', $function, $register, $quantity, bin2hex($data));
+        $json = json_encode([
             'DataID' => self::MODBUS_GATEWAY_DATA_ID,
-            'Function' => 16,
+            'Function' => $function,
             'Address' => $register,
             'Quantity' => $quantity,
+            // The gateway expects bytes transported as Latin-1 characters in JSON, not hex text.
             'Data' => mb_convert_encoding($data, 'UTF-8', 'ISO-8859-1')
-        ], JSON_THROW_ON_ERROR));
+        ], JSON_THROW_ON_ERROR);
 
-        $this->ValidateWriteResponse($response, pack('Cnn', 16, $register, $quantity), 'Modbus-Sammelschreiben');
+        $warnings = [];
+        set_error_handler(
+            static function (int $severity, string $message) use (&$warnings): bool {
+                $warnings[] = $message;
+                return true;
+            },
+            E_WARNING | E_USER_WARNING
+        );
+        $error = null;
+        $response = false;
+        try {
+            $response = $this->SendDataToParent($json);
+        } catch (Throwable $exception) {
+            $error = $exception;
+        } finally {
+            restore_error_handler();
+        }
+
+        foreach ($warnings as $warning) {
+            $this->LogError($context, $details . ': Gateway-Warnung: ' . $warning);
+        }
+        if ($error !== null) {
+            $this->LogError($context, $details . ': ' . $error->getMessage());
+        }
+        if ($warnings !== [] || $error !== null) {
+            $this->SendDebug('Modbus RX', $this->FormatModbusResponse($response), 0);
+            return false;
+        }
+
+        return $response;
     }
 
     private function ValidateWriteResponse(mixed $response, string $expected, string $context): bool
     {
-        $actual = is_string($response) ? bin2hex($response) : get_debug_type($response);
+        $actual = $this->FormatModbusResponse($response);
         $this->SendDebug('Modbus RX', $actual, 0);
         if (is_string($response) && strlen($response) === 2 && ord($response[0]) === (ord($expected[0]) | 0x80)) {
             $this->LogError($context, sprintf('Modbus-Exception %d; Antwort=%s, erwartet=%s.', ord($response[1]), $actual, bin2hex($expected)));
@@ -1046,6 +1089,14 @@ class DRUKamin extends IPSModule
         }
 
         return true;
+    }
+
+    private function FormatModbusResponse(mixed $response): string
+    {
+        if (is_bool($response)) {
+            return $response ? 'bool(true)' : 'bool(false)';
+        }
+        return is_string($response) ? bin2hex($response) : get_debug_type($response);
     }
 
     private function LogError(string $context, Throwable|string $error): void

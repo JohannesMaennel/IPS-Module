@@ -40,14 +40,36 @@ Statusrueckmeldungen und fuer FC6-Schreibbefehle auch TX-Daten und die
 hexadezimale Gateway-Antwort. Ein Zuend-Timeout ist kein Erfolgsnachweis:
 Die tatsaechliche Reaktion des Kamins muss am Geraet geprueft werden.
 
-FC6 und FC16 senden binaere Big-Endian-Registerwerte, fuer den JSON-Transport
+FC6 sendet binaere Big-Endian-Registerwerte, fuer den JSON-Transport
 mit `mb_convert_encoding()` von ISO-8859-1 nach UTF-8 kodiert, keinen Hextext.
 Hex wird nur im Debug angezeigt. FC6 muss Funktionscode, Adresse und Wert
-exakt bestaetigen; FC16 muss Funktionscode, Startadresse und Registeranzahl
-bestaetigen. Abweichungen und Modbus-Exceptions werden protokolliert und
+exakt bestaetigen. Abweichungen und Modbus-Exceptions werden protokolliert und
 brechen die abhaengige Aktion ab. Fuer Register 40200 und Kommando 101
 lautet die erwartete FC6-Antwort `069d080065`. `069d083030` bestaetigt dagegen
 den falschen Wert 0x3030 (ASCII "00") und wird nicht als Erfolg akzeptiert.
+
+**Welle speichern** schreibt das Intervall in 40420 und die zehn gepackten
+Stufenregister 40421-40430 einzeln mit FC6. Das reale DRU-Geraet mit Unit-ID 2
+hat einen korrekt formatierten FC16-Auftrag fuer diese elf Register mit
+`90 03` (ILLEGAL_DATA_VALUE) abgelehnt. Deshalb wird kein FC16-Auftrag gesendet.
+Die elf Schreibtelegramme erfolgen nur beim expliziten Speichern, nicht beim
+Bewegen der Regler. Jeder Wert muss bestaetigt werden; beim ersten Fehler
+stoppt die Folge ohne Wiederholung. Bereits bestaetigte Register koennen
+dann am Geraet geaendert sein; der Teilfortschritt wird protokolliert.
+Die lokalen Wave-Einstellungen werden erst nach allen elf Bestaetigungen
+als gespeichert uebernommen. Der reale FC6-Wave-Schreibablauf muss noch am
+Geraet bestaetigt werden.
+
+Gateway-Warnungen (z.B. `ILLEGAL_DATA_VALUE`, Modbus-Exception 03) werden nur
+waehrend des synchronen `SendDataToParent()`-Aufrufs abgefangen und mit
+Funktionscode, Registeradresse, Registeranzahl und Datenhex protokolliert.
+Der vorherige PHP-Fehlerhandler wird auch nach Exceptions wiederhergestellt.
+Eine Warnung bedeutet einen fehlgeschlagenen Auftrag; Wave-Einstellungen
+werden dann nicht als gespeichert uebernommen. Es erfolgt kein automatischer
+Wiederholungsversuch oder Wechsel zu anderen Schreibbefehlen.
+Bei einer Ablehnung die zugehoerigen Eintraege **Modbus TX**, **Modbus RX**
+und **Fehler** pruefen. Ohne diese Daten laesst sich nicht unterscheiden,
+ob Paketformat, Werte oder ein Geraetezustand die Ablehnung verursachen.
 
 ## Regressionstests
 
@@ -60,8 +82,9 @@ php -n ".\DRU Kamin\tests\regression.php"
 Der Test simuliert die IPS-Schnittstellen, einschliesslich einer ausschliesslich
 String-basierten `UpdateVisualizationValue()`-Signatur. Er prueft Lifecycle,
 Timer, externe Statusaenderungen, Verbindungsverlust und Wiederherstellung,
-Optionen und Brennerbefehle sowie binaere FC6-/FC16-Daten und deren
-Schreibbestaetigungen. PHP benoetigt die in Symcon vorhandene Erweiterung
+Optionen und Brennerbefehle sowie binaere FC6-Daten, deren
+Schreibbestaetigungen und den Abbruch teilweise geschriebener Wave-Folgen.
+PHP benoetigt die in Symcon vorhandene Erweiterung
 `mbstring`; bei einer portablen CLI diese ebenfalls aktivieren.
 Er ersetzt keinen Hardwaretest.
 

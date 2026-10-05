@@ -46,6 +46,10 @@ class IPSModule
     public bool $writeFails = false;
     public bool $overrideWriteResponse = false;
     public mixed $writeResponse = null;
+    public array $writeResponseQueue = [];
+    public ?int $warningFunction = null;
+    public bool $warningWithValidResponse = false;
+    public bool $parentThrows = false;
     public int $rawStatus = 0;
     public array $statusQueue = [];
     public array $properties = [];
@@ -54,6 +58,7 @@ class IPSModule
     public array $messages = [];
     public array $requests = [];
     public array $parentCalls = [];
+    public array $debug = [];
     public int $instanceStatus = 105;
 
     public function __construct() {
@@ -78,7 +83,7 @@ class IPSModule
     protected function SetStatus(int $status): void { $this->instanceStatus = $status; }
     protected function HasActiveParent(): bool { return $this->connection !== 0 && $this->parentActive; }
     protected function EnableAction(string $ident): void {}
-    protected function SendDebug(string $title, string $data, int $format): void {}
+    protected function SendDebug(string $title, string $data, int $format): void { $this->debug[] = [$title, $data]; }
     protected function RegisterVariableBoolean(string $ident, string $name, string $profile, int $position): void { $this->variable($ident, false); }
     protected function RegisterVariableInteger(string $ident, string $name, string $profile, int $position): void { $this->variable($ident, 0); }
     protected function RegisterVariableFloat(string $ident, string $name, string $profile, int $position): void { $this->variable($ident, 0.0); }
@@ -99,6 +104,15 @@ class IPSModule
     protected function SendDataToParent(string $json) {
         $request = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
         $this->requests[] = $request;
+        if ($this->warningFunction === $request['Function']) {
+            trigger_error('ILLEGAL_DATA_VALUE', E_USER_WARNING);
+            if (!$this->warningWithValidResponse) {
+                return false;
+            }
+        }
+        if ($this->parentThrows) {
+            throw new RuntimeException('Gateway transport exception');
+        }
         if ($request['Function'] === 3) {
             if ($this->readFails) {
                 return false;
@@ -114,6 +128,9 @@ class IPSModule
         }
         if ($this->writeFails) {
             return false;
+        }
+        if ($this->writeResponseQueue !== []) {
+            return array_shift($this->writeResponseQueue);
         }
         if ($this->overrideWriteResponse) {
             return $this->writeResponse;
@@ -262,21 +279,37 @@ check(
 $module->overrideWriteResponse = false;
 $failed->setValue($module, false);
 $waveRegisters = array_merge([60], array_fill(0, 10, 0x0f01));
+$module->requests = [];
 $writeMultiple->invoke($module, 40420, $waveRegisters);
-$request = $module->requests[count($module->requests) - 1];
 check(
-    !$failed->getValue($module) && $request['Quantity'] === 11
-    && mb_convert_encoding($request['Data'], 'ISO-8859-1', 'UTF-8') === pack('n*', ...$waveRegisters),
-    'FC16 sends exact binary Wave payload and validates register count'
+    !$failed->getValue($module) && count($module->requests) === 11
+    && array_column($module->requests, 'Function') === array_fill(0, 11, 6)
+    && array_column($module->requests, 'Address') === range(40420, 40430)
+    && array_column($module->requests, 'Quantity') === array_fill(0, 11, 1)
+    && array_map(
+        static fn (array $request): int => unpack('nvalue', mb_convert_encoding($request['Data'], 'ISO-8859-1', 'UTF-8'))['value'],
+        $module->requests
+    ) === $waveRegisters,
+    'Wave sends eleven individually confirmed FC6 writes with exact binary values'
 );
 $module->overrideWriteResponse = true;
-foreach ([pack('Cnn', 16, 40420, 10), pack('Cnn', 16, 40421, 11), hex2bin('9003'), false] as $response) {
+foreach ([pack('Cnn', 6, 40420, 59), pack('Cnn', 6, 40421, 60), hex2bin('8603'), false] as $response) {
     $module->writeResponse = $response;
     $failed->setValue($module, false);
+    $module->requests = [];
     $writeMultiple->invoke($module, 40420, $waveRegisters);
-    check($failed->getValue($module), 'FC16 rejects invalid echo: ' . (is_string($response) ? bin2hex($response) : 'false'));
+    check($failed->getValue($module) && count($module->requests) === 1, 'Wave stops on invalid FC6 echo: ' . (is_string($response) ? bin2hex($response) : 'false'));
 }
 $module->overrideWriteResponse = false;
+$module->writeResponseQueue = [pack('Cnn', 6, 40420, 60), pack('Cnn', 6, 40421, 0x0f01), false];
+$failed->setValue($module, false);
+$module->requests = [];
+$writeMultiple->invoke($module, 40420, $waveRegisters);
+check(
+    $failed->getValue($module) && count($module->requests) === 3
+    && str_contains($logs[count($logs) - 1][1], '2 von 11 Registern bereits bestätigt'),
+    'Partial Wave write stops immediately and logs confirmed register count'
+);
 foreach ([[-1, 101], [65536, 101], [40200, -1], [40200, 65536]] as [$register, $value]) {
     $failed->setValue($module, false);
     $requestCount = count($module->requests);
@@ -289,7 +322,78 @@ foreach ([[65535, [1, 2]], [40420, [65536]], [40420, ['1']], [40420, []], [40420
     $failed->setValue($module, false);
     $requestCount = count($module->requests);
     $writeMultiple->invoke($module, $register, $values);
-    check($failed->getValue($module) && count($module->requests) === $requestCount, 'FC16 rejects invalid range or values without sending');
+    check($failed->getValue($module) && count($module->requests) === $requestCount, 'Write sequence validates all values before sending');
+}
+
+$warningEscapes = [];
+$previousHandler = static function (int $severity, string $message) use (&$warningEscapes): bool {
+    $warningEscapes[] = $message;
+    return true;
+};
+set_error_handler($previousHandler, E_WARNING | E_USER_WARNING);
+try {
+    foreach ([3, 6] as $function) {
+        $module->warningFunction = $function;
+        $failed->setValue($module, false);
+        $logCount = count($logs);
+        ob_start();
+        if ($function === 3) {
+            $result = (new ReflectionMethod(DRUKamin::class, 'ReadRegister'))->invoke($module, 40203);
+        } elseif ($function === 6) {
+            $result = $writeRegister->invoke($module, 40200, 101);
+        }
+        $output = ob_get_clean();
+        check($output === '' && $warningEscapes === [] && $failed->getValue($module), 'FC' . $function . ' gateway warning is logged, not shown in UI');
+        check(count($logs) === $logCount + 1 && str_contains($logs[$logCount][1], 'ILLEGAL_DATA_VALUE') && str_contains($logs[$logCount][1], 'FC' . $function . ' Register='), 'Gateway warning preserves error and request context');
+        check($module->debug[count($module->debug) - 1] === ['Modbus RX', 'bool(false)'], 'Gateway rejection shows bool(false), not just bool');
+        if ($function !== 16) {
+            check($result === ($function === 3 ? -1 : false), 'Gateway warning returns explicit read/write failure');
+        }
+        $restored = set_error_handler($previousHandler, E_WARNING | E_USER_WARNING);
+        restore_error_handler();
+        check($restored === $previousHandler, 'FC' . $function . ' restores previous error handler');
+    }
+
+    $module->warningFunction = 6;
+    $module->rawStatus = (1 << 2) | (1 << 9);
+    $module->properties['EnableWave'] = true;
+    $beforeInterval = $module->attributes['WaveInterval'];
+    $beforePattern = $module->attributes['WavePattern'];
+    $module->RequestAction('SaveWaveSettings', json_encode(['interval' => 30, 'stages' => array_fill(0, 20, 100)]));
+    check(
+        $module->attributes['WaveInterval'] === $beforeInterval && $module->attributes['WavePattern'] === $beforePattern,
+        'Rejected Wave write does not save requested settings'
+    );
+    check($warningEscapes === [], 'Wave action does not leak gateway warning to outer UI handler');
+    $module->warningFunction = null;
+    $module->requests = [];
+    $module->RequestAction('SaveWaveSettings', json_encode(['interval' => 30, 'stages' => array_fill(0, 20, 100)]));
+    $writes = array_values(array_filter($module->requests, static fn (array $request): bool => $request['Function'] !== 3));
+    check(
+        count($writes) === 11 && array_column($writes, 'Function') === array_fill(0, 11, 6)
+        && $module->attributes['WaveInterval'] === 30
+        && json_decode($module->attributes['WavePattern'], true) === array_fill(0, 20, 100),
+        'Wave action saves settings only after all eleven FC6 confirmations'
+    );
+
+    $module->warningFunction = 6;
+    $module->warningWithValidResponse = true;
+    $failed->setValue($module, false);
+    check(!$writeRegister->invoke($module, 40200, 101) && $failed->getValue($module), 'Warning cannot be masked by a valid-looking write response');
+    $module->warningFunction = null;
+    $module->parentThrows = true;
+    $failed->setValue($module, false);
+    check(!$writeRegister->invoke($module, 40200, 101) && $failed->getValue($module), 'Gateway exception is logged as failed write');
+    $restored = set_error_handler($previousHandler, E_WARNING | E_USER_WARNING);
+    restore_error_handler();
+    check($restored === $previousHandler, 'Gateway exception also restores previous error handler');
+    $module->parentThrows = false;
+    $failed->setValue($module, false);
+    check($writeRegister->invoke($module, 40200, 101), 'Successful writes recover after gateway warning/exception');
+    trigger_error('Unrelated warning outside gateway call', E_USER_WARNING);
+    check($warningEscapes === ['Unrelated warning outside gateway call'], 'Warnings outside Modbus call still reach original handler');
+} finally {
+    restore_error_handler();
 }
 
 echo 'All DRU regression checks passed.' . PHP_EOL;
