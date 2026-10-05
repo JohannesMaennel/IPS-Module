@@ -125,17 +125,17 @@
             button.textContent = label;
             button.setAttribute("aria-pressed", String(operationMode === mode));
             const selected = operationMode === mode;
-            let allowed = statusAvailable && !selected;
+            let allowed = statusAvailable && mainBurnerOn && !selected;
             if (mode === "temperature") {
                 allowed = allowed && !fault && temperatureState !== 0b00
-                    && temperatureState !== 0b11 && (mainBurnerOn || temperatureActive);
+                    && temperatureState !== 0b11;
             } else if (mode === "wave") {
                 allowed = allowed && !fault && mainBurnerOn;
             }
             button.disabled = !allowed;
             if (!statusAvailable) {
                 button.title = "Auf einen aktuellen Gerätestatus warten.";
-            } else if (mode !== "manual" && !mainBurnerOn && !selected) {
+            } else if (!mainBurnerOn && !selected) {
                 button.title = "Der Modus kann erst bei eingeschaltetem Hauptbrenner gewählt werden.";
             }
             button.addEventListener("click", () => sendAction("OperationMode", mode));

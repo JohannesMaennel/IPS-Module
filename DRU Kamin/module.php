@@ -54,9 +54,10 @@ class DRUKamin extends IPSModule
         $this->SynchronizeVariables();
 
         if ($this->ReadParentConnectionID() !== 0) {
-            $this->SetTimerInterval('PollStatus', 60000);
+            $this->SetTimerInterval('PollStatus', 5000);
             try {
                 $this->PollStatus();
+                $this->UpdateVisualization();
             } catch (Throwable $error) {
                 $this->LogError('Statusabfrage nach ApplyChanges fehlgeschlagen', $error);
             }
@@ -73,6 +74,9 @@ class DRUKamin extends IPSModule
         if ($Ident === 'PollStatus') {
             try {
                 $this->PollStatus();
+                if (!$this->actionFailed) {
+                    $this->UpdateVisualization();
+                }
             } catch (Throwable $error) {
                 $this->LogError('Statusabfrage fehlgeschlagen', $error);
             }
@@ -144,6 +148,9 @@ class DRUKamin extends IPSModule
             }
 
             $this->PollStatus();
+            if (!$this->actionFailed) {
+                $this->UpdateVisualization();
+            }
         } catch (Throwable $error) {
             $this->LogError('Aktion ' . $Ident . ' fehlgeschlagen', $error);
             try {
@@ -214,6 +221,15 @@ class DRUKamin extends IPSModule
             return '';
         }
 
+        return str_replace(
+            ['{{CSS}}', '{{JS}}', '{{DATA}}'],
+            [$css, $js, json_encode($this->GetVisualizationData(), JSON_THROW_ON_ERROR | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)],
+            $html
+        );
+    }
+
+    private function GetVisualizationData(): array
+    {
         $featureIdents = [
             'Fireplace' => 'EnableFireplace',
             'FireplaceFault' => 'EnableFireplace',
@@ -234,7 +250,7 @@ class DRUKamin extends IPSModule
             $values[$ident] = GetValue($this->FindVariableId($ident));
         }
 
-        $data = json_encode([
+        return [
             'values' => $values,
             'statusAvailable' => $this->ReadAttributeInteger('StatusUpdatedAt') > 0
                 && (time() - $this->ReadAttributeInteger('StatusUpdatedAt')) <= 120
@@ -249,13 +265,12 @@ class DRUKamin extends IPSModule
                 'interval' => $this->ReadAttributeInteger('WaveInterval'),
                 'stages' => $this->ReadWavePattern()
             ]
-        ], JSON_THROW_ON_ERROR | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+        ];
+    }
 
-        return str_replace(
-            ['{{CSS}}', '{{JS}}', '{{DATA}}'],
-            [$css, $js, $data],
-            $html
-        );
+    private function UpdateVisualization(): void
+    {
+        $this->UpdateVisualizationValue($this->GetVisualizationData());
     }
 
     private function RegisterProfiles(): void
@@ -479,13 +494,6 @@ class DRUKamin extends IPSModule
         }
 
         $this->LogIgnitionStep('Ausschaltstatus gelesen', $status);
-        if (($status & (1 << 3)) !== 0) {
-            $this->LogIgnitionStep('Zweiter Brenner aktiv; sende Kommando 4 zum Ausschalten');
-            $this->WriteRegister(self::COMMAND_REGISTER, 4);
-            if ($this->actionFailed || !$this->WaitForStatusBit(3, false, 'Der zweite Brenner konnte nicht ausgeschaltet werden.')) {
-                return;
-            }
-        }
         if (($status & (1 << 9)) !== 0) {
             $this->LogIgnitionStep('Wave aktiv; sende Kommando 7 zum Beenden');
             $this->WriteRegister(self::COMMAND_REGISTER, 7);
@@ -543,67 +551,15 @@ class DRUKamin extends IPSModule
             return;
         }
 
-        if (($status & (1 << 1)) === 0) {
-            $this->LogIgnitionStep('Pilotflamme aus; sende Kommando 100');
-            $this->WriteRegister(self::COMMAND_REGISTER, 100);
-            if ($this->actionFailed) {
-                $this->LogIgnitionStep('Abbruch: Kommando 100 konnte nicht gesendet werden');
-                $this->AbortIgnition('Kommando 100 konnte nicht bestätigt werden');
-                return;
-            }
-            $this->LogIgnitionStep('Warte auf Pilotflammen-Rückmeldung (Statusbit 1)');
-            if (!$this->WaitForStatusBit(1, true, 'Zündung der Pilotflamme ist fehlgeschlagen.')) {
-                $this->AbortIgnition('Pilotflamme wurde nicht bestätigt');
-                return;
-            }
-            $this->LogIgnitionStep('Pilotflamme wurde bestätigt');
-        } else {
-            $this->LogIgnitionStep('Pilotflamme ist bereits aktiv', $status);
-        }
-
-        $status = $this->ReadRegister(self::STATUS_REGISTER);
-        if ($this->actionFailed) {
-            $this->LogIgnitionStep('Abbruch: Status nach Pilotflamme konnte nicht gelesen werden');
-            $this->AbortIgnition('Status nach Pilotflamme konnte nicht gelesen werden');
-            return;
-        }
-        $this->LogIgnitionStep('Status nach Pilotflamme gelesen', $status);
-        if (($status & 1) !== 0) {
-            $this->LogError('Zündablauf', 'Kaminfehler nach Pilotflamme; Hauptbrenner wird nicht gezündet.');
-            $this->AbortIgnition('Kaminfehler nach Pilotflamme');
-            return;
-        }
-
-        $this->LogIgnitionStep('Prüfe Zündfreigabe vor Hauptbrenner (Statusbit 15)', $status);
-        $status = $this->WaitForIgnitionAllowed($status);
-        if ($this->actionFailed) {
-            $this->LogIgnitionStep('Abbruch beim Warten auf Freigabe für Hauptbrenner');
-            $this->AbortIgnition('Freigabe für Hauptbrenner wurde nicht erteilt');
-            return;
-        }
-        $this->LogIgnitionStep('Freigabe für Hauptbrenner erteilt', $status);
-        if (($status & 1) !== 0) {
-            $this->LogError('Zündablauf', 'Kaminfehler vor Hauptbrenner-Zündung.');
-            $this->AbortIgnition('Kaminfehler vor Hauptbrenner-Zündung');
-            return;
-        }
-        if (($status & (1 << 2)) !== 0) {
-            $this->LogIgnitionStep('Hauptbrenner wurde bereits eingeschaltet', $status);
-            $this->WriteAttributeInteger('LastIgnitionAt', time());
-            return;
-        }
-
-        $this->LogIgnitionStep('Sende Kommando 101 zum Einschalten des Hauptbrenners');
+        $this->LogIgnitionStep('Sende Kommando 101 zum Starten des Hauptbrenners');
         $this->WriteRegister(self::COMMAND_REGISTER, 101);
         if ($this->actionFailed) {
             $this->LogIgnitionStep('Abbruch: Kommando 101 konnte nicht gesendet werden');
-            $this->AbortIgnition('Kommando 101 konnte nicht bestätigt werden');
             return;
         }
-        $this->LogIgnitionStep('Warte auf Hauptbrenner-Rückmeldung (Statusbit 2)');
+        $this->LogIgnitionStep('Warte auf Hauptbrenner-Rückmeldung (Statusbit 2); Pilotkommando 100 wird nicht verwendet');
         if (!$this->WaitForStatusBit(2, true, 'Hauptbrenner konnte nicht gezündet werden.')) {
             $this->LogIgnitionStep('Zeitüberschreitung: keine Bestätigung des Hauptbrenners');
-            $this->AbortIgnition('Hauptbrenner wurde nicht bestätigt');
             return;
         }
 
