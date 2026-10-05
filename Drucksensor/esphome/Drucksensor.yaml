@@ -282,11 +282,17 @@ sensor:
 
   - platform: ads1115
     multiplexer: A0_GND
-    gain: 4.096
+    gain: 6.144
     id: pressure_voltage
     name: "Drucksensor Spannung"
     internal: true
     update_interval: 1s
+    filters:
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 1
+          send_first_at: 1
+      - delta: 0.10
 
   - platform: template
     name: "Druck"
@@ -308,6 +314,10 @@ sensor:
       }
 
       if(bar < 0) bar = 0;
+
+      if (bar == id(pressure_bar).state) {
+        return {};
+      }
 
       return bar;
     update_interval: 1s

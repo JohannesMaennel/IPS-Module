@@ -537,7 +537,15 @@ class Drucksensor extends IPSModule
             return;
         }
 
-        $pattern = '^' . preg_quote($baseTopic, '/') . '/(state|status)$';
+        $topicPatterns = [];
+
+        foreach (['state', 'status'] as $suffix) {
+            $topic = $baseTopic . '/' . $suffix;
+            $topicPatterns[] = preg_quote(json_encode($topic), '/');
+            $topicPatterns[] = preg_quote(json_encode($topic, JSON_UNESCAPED_SLASHES), '/');
+        }
+
+        $pattern = '"Topic"\s*:\s*(?:' . implode('|', $topicPatterns) . ')';
         $this->SetReceiveDataFilter($pattern);
     }
 
