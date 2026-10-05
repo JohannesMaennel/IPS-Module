@@ -17,7 +17,7 @@ class DRUKamin extends IPSModule
     {
         parent::Create();
 
-        $this->RequireParent(self::MODBUS_GATEWAY_MODULE_ID);
+        $this->ConnectParent(self::MODBUS_GATEWAY_MODULE_ID);
 
         $this->RegisterPropertyBoolean('EnableFireplace', true);
         $this->RegisterPropertyBoolean('EnableSecondBurner', false);
@@ -53,18 +53,8 @@ class DRUKamin extends IPSModule
 
         $this->SynchronizeVariables();
 
-        if ($this->ReadParentConnectionID() !== 0) {
-            $this->SetTimerInterval('PollStatus', 5000);
-            try {
-                $this->PollStatus();
-                $this->UpdateVisualization();
-            } catch (Throwable $error) {
-                $this->LogError('Statusabfrage nach ApplyChanges fehlgeschlagen', $error);
-            }
-        } else {
-            $this->SetTimerInterval('PollStatus', 0);
-            IPS_LogMessage('DRU Kamin', 'Kein Modbus-Gateway verbunden.');
-        }
+        $this->SetTimerInterval('PollStatus', 5000);
+        $this->RefreshStatus();
     }
 
     public function RequestAction($Ident, $Value)
@@ -72,14 +62,13 @@ class DRUKamin extends IPSModule
         $this->actionFailed = false;
 
         if ($Ident === 'PollStatus') {
-            try {
-                $this->PollStatus();
-                if (!$this->actionFailed) {
-                    $this->UpdateVisualization();
-                }
-            } catch (Throwable $error) {
-                $this->LogError('Statusabfrage fehlgeschlagen', $error);
-            }
+            $this->RefreshStatus();
+            return;
+        }
+
+        if (!$this->HasActiveParent()) {
+            $this->LogError('Aktion ' . $Ident, 'Modbus-Gateway oder I/O ist nicht aktiv.');
+            $this->RefreshStatus();
             return;
         }
 
@@ -147,18 +136,10 @@ class DRUKamin extends IPSModule
                     break;
             }
 
-            $this->PollStatus();
-            if (!$this->actionFailed) {
-                $this->UpdateVisualization();
-            }
         } catch (Throwable $error) {
             $this->LogError('Aktion ' . $Ident . ' fehlgeschlagen', $error);
-            try {
-                $this->PollStatus();
-            } catch (Throwable $statusError) {
-                $this->LogError('Statuswiederherstellung nach Aktion fehlgeschlagen', $statusError);
-            }
         }
+        $this->RefreshStatus();
     }
 
     public function GetConfigurationForm()
@@ -206,7 +187,12 @@ class DRUKamin extends IPSModule
 
         return json_encode([
             'elements' => $elements,
-            'actions' => []
+            'actions' => [],
+            'status' => [
+                ['code' => 102, 'icon' => 'active', 'caption' => 'Modbus-Kommunikation aktiv'],
+                ['code' => 104, 'icon' => 'inactive', 'caption' => 'Modbus-Gateway oder I/O nicht aktiv'],
+                ['code' => 201, 'icon' => 'error', 'caption' => 'Modbus-Status konnte nicht gelesen werden']
+            ]
         ], JSON_THROW_ON_ERROR);
     }
 
@@ -253,8 +239,9 @@ class DRUKamin extends IPSModule
         return [
             'values' => $values,
             'statusAvailable' => $this->ReadAttributeInteger('StatusUpdatedAt') > 0
-                && (time() - $this->ReadAttributeInteger('StatusUpdatedAt')) <= 120
-                && $this->ReadParentConnectionID() !== 0,
+                && (time() - $this->ReadAttributeInteger('StatusUpdatedAt')) < 15
+                && $this->HasActiveParent(),
+            'statusValidForMs' => max(0, 15 - (time() - $this->ReadAttributeInteger('StatusUpdatedAt'))) * 1000,
             'statusRegister' => $this->ReadAttributeInteger('StatusRegister'),
             'canSetFlameHeight' => $this->CanSetFlameHeight(),
             'features' => [
@@ -270,7 +257,25 @@ class DRUKamin extends IPSModule
 
     private function UpdateVisualization(): void
     {
-        $this->UpdateVisualizationValue($this->GetVisualizationData());
+        try {
+            if (!$this->UpdateVisualizationValue(json_encode($this->GetVisualizationData(), JSON_THROW_ON_ERROR))) {
+                $this->LogError('Visualisierungsupdate', 'Statusnachricht konnte nicht gesendet werden.');
+            }
+        } catch (Throwable $error) {
+            $this->LogError('Visualisierungsupdate fehlgeschlagen', $error);
+        }
+    }
+
+    private function RefreshStatus(): void
+    {
+        try {
+            $this->PollStatus();
+        } catch (Throwable $error) {
+            $this->WriteAttributeInteger('StatusUpdatedAt', 0);
+            $this->SetStatus(201);
+            $this->LogError('Statusabfrage fehlgeschlagen', $error);
+        }
+        $this->UpdateVisualization();
     }
 
     private function RegisterProfiles(): void
@@ -406,13 +411,17 @@ class DRUKamin extends IPSModule
     private function PollStatus(): void
     {
         $this->actionFailed = false;
-        if ($this->ReadParentConnectionID() === 0) {
-            $this->LogError('Statusabfrage', 'Kein Modbus-Gateway verbunden.');
+        if (!$this->HasActiveParent()) {
+            $this->WriteAttributeInteger('StatusUpdatedAt', 0);
+            $this->SetStatus(104);
+            $this->LogError('Statusabfrage', 'Modbus-Gateway oder I/O nicht verbunden oder nicht aktiv.');
             return;
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
         if ($this->actionFailed) {
+            $this->WriteAttributeInteger('StatusUpdatedAt', 0);
+            $this->SetStatus(201);
             return;
         }
         $this->WriteAttributeInteger('StatusRegister', $status);
@@ -427,6 +436,8 @@ class DRUKamin extends IPSModule
             'TemperatureControl',
             (($status >> 13) & 0b11) === 0b10
         );
+        $this->SetStatus(102);
+        $this->UpdateVisualization();
 
         if ($this->ReadPropertyBoolean('EnableTemperatureControl')) {
             $roomTemperatureRaw = $this->ReadRegister(40207);
@@ -928,7 +939,8 @@ class DRUKamin extends IPSModule
         $now = time();
 
         return $statusUpdatedAt > 0
-            && $now - $statusUpdatedAt <= 120
+            && $now - $statusUpdatedAt < 15
+            && $this->HasActiveParent()
             && ($status & 1) === 0
             && ($status & (1 << 2)) !== 0
             && ($status & (1 << 9)) === 0
@@ -959,6 +971,10 @@ class DRUKamin extends IPSModule
             return -1;
         }
 
+        if (ord($response[0]) !== 3 || ord($response[1]) !== 2 || strlen($response) !== 4) {
+            $this->LogError('Modbus-Lesen', 'Ungültige FC3-Antwort für Register ' . $register . ': ' . bin2hex($response));
+            return -1;
+        }
         $value = unpack('nvalue', substr($response, 2, 2));
         if (!is_array($value) || !isset($value['value'])) {
             $this->LogError('Modbus-Lesen', 'Der Wert von Register ' . $register . ' ist ungültig.');
@@ -970,6 +986,7 @@ class DRUKamin extends IPSModule
 
     private function WriteRegister(int $register, int $value): bool
     {
+        $this->SendDebug('Modbus TX', sprintf('FC6 Register=%d Wert=%d Daten=%s', $register, $value, bin2hex(pack('n', $value))), 0);
         $response = $this->SendDataToParent(json_encode([
             'DataID' => self::MODBUS_GATEWAY_DATA_ID,
             'Function' => 6,
@@ -978,7 +995,8 @@ class DRUKamin extends IPSModule
             'Data' => bin2hex(pack('n', $value))
         ], JSON_THROW_ON_ERROR));
 
-        if ($response === false) {
+        $this->SendDebug('Modbus RX', is_string($response) ? bin2hex($response) : get_debug_type($response), 0);
+        if ($response === false || $response === null || $response === '') {
             $this->LogError('Modbus-Schreiben', 'Keine gültige Antwort für Register ' . $register . ', Wert ' . $value . '.');
             return false;
         }

@@ -16,6 +16,8 @@
     let temperatureState = 0;
     let temperatureActive = false;
     let operationMode = "manual";
+    let statusExpiryTimer;
+    let renderedState = "";
 
     const toggleLabels = {
         Fireplace: "Hauptbrenner",
@@ -23,6 +25,7 @@
         Light: "Kaminlicht",
         BoostFan: "Boost-Lüfter"
     };
+    const toggleBits = { Fireplace: 2, SecondBurner: 3, Light: 8, BoostFan: 7 };
 
     function sendAction(ident, value) {
         statusLabel.textContent = "Befehl gesendet – warte auf Rückmeldung";
@@ -30,12 +33,27 @@
     }
 
     function applyData(nextData) {
-        data = nextData;
+        try {
+            data = typeof nextData === "string" ? JSON.parse(nextData) : nextData;
+            if (!data || typeof data !== "object" || !Number.isInteger(data.statusRegister)
+                || data.statusRegister < 0 || data.statusRegister > 65535) {
+                throw new Error("Ungültige Statusnachricht");
+            }
+        } catch (error) {
+            console.error("DRU Statusnachricht konnte nicht verarbeitet werden", error);
+            window.clearTimeout(statusExpiryTimer);
+            renderedState = "";
+            statusAvailable = false;
+            statusLabel.textContent = "Statusnachricht ungültig – Steuerung gesperrt";
+            statusLabel.classList.add("error");
+            render();
+            return;
+        }
         values = data.values || {};
         features = data.features || {};
         waveSettings = data.waveSettings || waveSettings;
         status = Number(data.statusRegister || 0);
-        statusAvailable = Boolean(data.statusAvailable);
+        statusAvailable = data.statusAvailable === true;
         mainBurnerOn = (status & (1 << 2)) !== 0;
         fault = (status & 1) !== 0;
         ignitionForbidden = (status & (1 << 15)) !== 0;
@@ -64,7 +82,21 @@
         temperature.textContent = values.RoomTemperature === undefined
             ? ""
             : `${Number(values.RoomTemperature).toFixed(1)} °C`;
-        render();
+        window.clearTimeout(statusExpiryTimer);
+        if (statusAvailable) {
+            statusExpiryTimer = window.setTimeout(() => {
+                statusAvailable = false;
+                renderedState = "";
+                statusLabel.textContent = "Kein aktueller Modbus-Status – Steuerung gesperrt";
+                statusLabel.classList.add("error");
+                render();
+            }, Math.max(0, Number(data.statusValidForMs ?? 15000)));
+        }
+        const nextState = JSON.stringify([values, features, waveSettings, status, statusAvailable, data.canSetFlameHeight]);
+        if (nextState !== renderedState) {
+            renderedState = nextState;
+            render();
+        }
     }
 
     window.handleMessage = applyData;
@@ -77,12 +109,12 @@
                 return;
             }
 
-            const isOn = Boolean(values[ident]);
+            const isOn = (status & (1 << toggleBits[ident])) !== 0;
             const button = document.createElement("button");
             button.className = "control";
             button.type = "button";
-            button.setAttribute("aria-pressed", String(isOn));
-            button.textContent = `${label}: ${isOn ? "Ein" : "Aus"}`;
+            button.setAttribute("aria-pressed", String(statusAvailable && isOn));
+            button.textContent = `${label}: ${statusAvailable ? (isOn ? "Ein" : "Aus") : "Unbekannt"}`;
 
             let allowed = statusAvailable;
             if (ident === "Fireplace" && !isOn) {
@@ -123,19 +155,19 @@
             button.className = "control mode-button";
             button.type = "button";
             button.textContent = label;
-            button.setAttribute("aria-pressed", String(operationMode === mode));
+            button.setAttribute("aria-pressed", String(statusAvailable && operationMode === mode));
             const selected = operationMode === mode;
-            let allowed = statusAvailable && mainBurnerOn && !selected;
+            let allowed = statusAvailable && !selected;
             if (mode === "temperature") {
                 allowed = allowed && !fault && temperatureState !== 0b00
-                    && temperatureState !== 0b11;
+                    && temperatureState !== 0b11 && mainBurnerOn;
             } else if (mode === "wave") {
                 allowed = allowed && !fault && mainBurnerOn;
             }
             button.disabled = !allowed;
             if (!statusAvailable) {
                 button.title = "Auf einen aktuellen Gerätestatus warten.";
-            } else if (!mainBurnerOn && !selected) {
+            } else if (mode !== "manual" && !mainBurnerOn && !selected) {
                 button.title = "Der Modus kann erst bei eingeschaltetem Hauptbrenner gewählt werden.";
             }
             button.addEventListener("click", () => sendAction("OperationMode", mode));
