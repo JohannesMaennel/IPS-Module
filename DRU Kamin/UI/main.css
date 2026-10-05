@@ -82,6 +82,12 @@ input {
     background: #d9770630;
 }
 
+button:disabled,
+input:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
 .range-control {
     display: grid;
     grid-column: 1 / -1;

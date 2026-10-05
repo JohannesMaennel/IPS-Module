@@ -5,8 +5,21 @@
     const features = data.features || {};
     const waveSettings = data.waveSettings || { interval: 10, stages: Array(20).fill(50) };
     const controls = document.getElementById("controls");
-    const status = document.getElementById("connectionStatus");
+    const statusLabel = document.getElementById("connectionStatus");
     const temperature = document.getElementById("temperature");
+    const status = Number(data.statusRegister || 0);
+    const statusAvailable = Boolean(data.statusAvailable);
+    const mainBurnerOn = (status & (1 << 2)) !== 0;
+    const fault = (status & 1) !== 0;
+    const ignitionForbidden = (status & (1 << 15)) !== 0;
+    const waveActive = (status & (1 << 9)) !== 0;
+    const temperatureState = (status >> 13) & 0b11;
+    const temperatureActive = temperatureState === 0b10;
+    const operationMode = temperatureActive
+        ? "temperature"
+        : waveActive
+            ? "wave"
+            : "manual";
 
     const toggleLabels = {
         Fireplace: "Hauptbrenner",
@@ -14,26 +27,24 @@
         Light: "Kaminlicht",
         BoostFan: "Boost-Lüfter"
     };
-    let operationMode = values.TemperatureControl
-        ? "temperature"
-        : values.Wave
-            ? "wave"
-            : "manual";
 
-    const issues = [];
-    if (data.communicationError) {
-        issues.push(data.communicationError);
-    }
-    if (values.FireplaceFault) {
-        issues.push("Kaminfehler erkannt");
-    }
-    status.textContent = issues.join(" · ") || "Verbunden";
-    if (issues.length > 0) {
-        status.classList.add("error");
+    if (!statusAvailable) {
+        statusLabel.textContent = "Kein aktueller Modbus-Status – Steuerung gesperrt";
+        statusLabel.classList.add("error");
+    } else if (fault) {
+        statusLabel.textContent = "Kaminfehler erkannt";
+        statusLabel.classList.add("error");
+    } else {
+        statusLabel.textContent = "Verbunden";
     }
 
     if (values.RoomTemperature !== undefined) {
         temperature.textContent = `${Number(values.RoomTemperature).toFixed(1)} °C`;
+    }
+
+    function sendAction(ident, value) {
+        statusLabel.textContent = "Befehl gesendet – warte auf Rückmeldung";
+        requestAction(ident, value);
     }
 
     function render() {
@@ -44,29 +55,32 @@
                 return;
             }
 
+            const isOn = Boolean(values[ident]);
             const button = document.createElement("button");
             button.className = "control";
             button.type = "button";
-            button.setAttribute("aria-pressed", String(Boolean(values[ident])));
-            button.textContent = `${label}: ${values[ident] ? "Ein" : "Aus"}`;
-            if (ident === "Fireplace" && operationMode === "temperature") {
-                button.disabled = true;
-                button.title = "Der Kamin regelt den Hauptbrenner im Temperaturmodus selbst.";
-                controls.appendChild(button);
-                return;
+            button.setAttribute("aria-pressed", String(isOn));
+            button.textContent = `${label}: ${isOn ? "Ein" : "Aus"}`;
+
+            let allowed = statusAvailable;
+            if (ident === "Fireplace" && !isOn) {
+                allowed = allowed && !fault && !ignitionForbidden && !temperatureActive;
+                if (temperatureActive) {
+                    button.title = "Im Temperaturmodus regelt der Kamin den Brenner selbst.";
+                } else if (ignitionForbidden) {
+                    button.title = "Der Kamin hat die Zündung momentan nicht freigegeben.";
+                } else if (fault) {
+                    button.title = "Ein Kaminfehler verhindert die Zündung.";
+                }
+            } else if (ident === "SecondBurner" && !isOn) {
+                allowed = allowed && mainBurnerOn && !fault;
+            } else if (!isOn) {
+                allowed = allowed && !fault;
             }
-            button.addEventListener("click", () => {
-                const nextValue = !Boolean(values[ident]);
-                requestAction(ident, nextValue);
-                values[ident] = nextValue;
-                render();
-            });
+            button.disabled = !allowed;
+            button.addEventListener("click", () => sendAction(ident, !isOn));
             controls.appendChild(button);
         });
-
-        if (!values.Fireplace && operationMode !== "temperature" && operationMode !== "wave") {
-            return;
-        }
 
         const modeSection = document.createElement("section");
         modeSection.className = "mode-section";
@@ -74,12 +88,11 @@
         modeTitle.textContent = "Betriebsart";
         modeSection.appendChild(modeTitle);
 
-        const modeButtons = [
+        [
             ["manual", "Manuell", true],
             ["temperature", "Temperaturregelung", Boolean(features.temperatureControl)],
             ["wave", "Wave", Boolean(features.wave)]
-        ];
-        modeButtons.forEach(([mode, label, available]) => {
+        ].forEach(([mode, label, available]) => {
             if (!available) {
                 return;
             }
@@ -89,13 +102,21 @@
             button.type = "button";
             button.textContent = label;
             button.setAttribute("aria-pressed", String(operationMode === mode));
-            button.addEventListener("click", () => {
-                requestAction("OperationMode", mode);
-                operationMode = mode;
-                values.TemperatureControl = mode === "temperature";
-                values.Wave = mode === "wave";
-                render();
-            });
+            const selected = operationMode === mode;
+            let allowed = statusAvailable && !selected;
+            if (mode === "temperature") {
+                allowed = allowed && !fault && temperatureState !== 0b00
+                    && temperatureState !== 0b11 && (mainBurnerOn || temperatureActive);
+            } else if (mode === "wave") {
+                allowed = allowed && !fault && mainBurnerOn;
+            }
+            button.disabled = !allowed;
+            if (!statusAvailable) {
+                button.title = "Auf einen aktuellen Gerätestatus warten.";
+            } else if (mode !== "manual" && !mainBurnerOn && !selected) {
+                button.title = "Der Modus kann erst bei eingeschaltetem Hauptbrenner gewählt werden.";
+            }
+            button.addEventListener("click", () => sendAction("OperationMode", mode));
             modeSection.appendChild(button);
         });
         controls.appendChild(modeSection);
@@ -111,6 +132,10 @@
             range.max = "100";
             range.step = "1";
             range.value = String(values.FlameHeight);
+            range.disabled = !statusAvailable || !data.canSetFlameHeight;
+            if (range.disabled) {
+                range.title = "Flammenhöhe ist erst nach freigegebener Zündung und im manuellen Modus verfügbar.";
+            }
 
             const output = document.createElement("output");
             output.value = `${range.value} %`;
@@ -118,8 +143,7 @@
                 output.value = `${range.value} %`;
             });
             range.addEventListener("change", () => {
-                requestAction("FlameHeight", Number(range.value));
-                values.FlameHeight = Number(range.value);
+                sendAction("FlameHeight", Number(range.value));
             });
 
             wrapper.append(range, output);
@@ -137,6 +161,7 @@
             range.max = "35";
             range.step = "0.5";
             range.value = String(values.TemperatureSetpoint);
+            range.disabled = !statusAvailable || fault;
 
             const output = document.createElement("output");
             output.value = `${Number(range.value).toFixed(1)} °C`;
@@ -144,8 +169,7 @@
                 output.value = `${Number(range.value).toFixed(1)} °C`;
             });
             range.addEventListener("change", () => {
-                requestAction("TemperatureSetpoint", Number(range.value));
-                values.TemperatureSetpoint = Number(range.value);
+                sendAction("TemperatureSetpoint", Number(range.value));
             });
 
             wrapper.append(range, output);
@@ -165,6 +189,7 @@
         heading.textContent = "Wave-Muster";
         editor.appendChild(heading);
 
+        const enabled = statusAvailable && mainBurnerOn && waveActive && !fault;
         const intervalLabel = document.createElement("label");
         intervalLabel.className = "interval-control";
         intervalLabel.textContent = "Intervall zwischen den Stufen";
@@ -175,6 +200,7 @@
         interval.max = "60";
         interval.step = "1";
         interval.value = String(waveSettings.interval);
+        interval.disabled = !enabled;
 
         const intervalOutput = document.createElement("output");
         intervalOutput.value = `${interval.value} s`;
@@ -204,6 +230,7 @@
             range.max = "100";
             range.step = "1";
             range.value = String(value);
+            range.disabled = !enabled;
             range.setAttribute("aria-label", `Wave-Stufe ${index + 1}`);
             range.addEventListener("input", () => {
                 output.value = `${range.value}%`;
@@ -221,21 +248,15 @@
         save.className = "control wave-save";
         save.type = "button";
         save.textContent = "Wave-Muster speichern";
+        save.disabled = !enabled;
         save.addEventListener("click", () => {
             save.disabled = true;
-            save.textContent = "Speichere …";
-            requestAction("SaveWaveSettings", JSON.stringify({
+            sendAction("SaveWaveSettings", JSON.stringify({
                 interval: Number(interval.value),
                 stages: stageValues
             }));
-            waveSettings.interval = Number(interval.value);
-            waveSettings.stages = stageValues.map(value =>
-                Math.round((Math.round(value * 14 / 100)) * 100 / 14)
-            );
-            save.textContent = "Speicherauftrag gesendet";
             window.setTimeout(() => {
-                save.disabled = false;
-                save.textContent = "Wave-Muster speichern";
+                save.disabled = !enabled;
             }, 2000);
         });
         editor.appendChild(save);

@@ -26,6 +26,8 @@ class DRUKamin extends IPSModule
 
         $this->RegisterAttributeInteger('LastFlameWrite', 0);
         $this->RegisterAttributeInteger('LastIgnitionAt', 0);
+        $this->RegisterAttributeInteger('StatusRegister', 0);
+        $this->RegisterAttributeInteger('StatusUpdatedAt', 0);
         $this->RegisterAttributeInteger('WaveInterval', 10);
         $this->RegisterAttributeString(
             'WavePattern',
@@ -54,11 +56,11 @@ class DRUKamin extends IPSModule
             try {
                 $this->PollStatus();
             } catch (Throwable $error) {
-                $this->SetCommunicationError($error->getMessage());
+                $this->LogError('Statusabfrage nach ApplyChanges fehlgeschlagen', $error);
             }
         } else {
             $this->SetTimerInterval('PollStatus', 0);
-            $this->SetCommunicationError('Kein Modbus-Gateway verbunden.');
+            IPS_LogMessage('DRU Kamin', 'Kein Modbus-Gateway verbunden.');
         }
     }
 
@@ -68,7 +70,7 @@ class DRUKamin extends IPSModule
             try {
                 $this->PollStatus();
             } catch (Throwable $error) {
-                $this->SetCommunicationError($error->getMessage());
+                $this->LogError('Statusabfrage fehlgeschlagen', $error);
             }
             return;
         }
@@ -120,8 +122,12 @@ class DRUKamin extends IPSModule
 
             $this->PollStatus();
         } catch (Throwable $error) {
-            $this->SetCommunicationError($error->getMessage());
-            throw $error;
+            $this->LogError('Aktion ' . $Ident . ' fehlgeschlagen', $error);
+            try {
+                $this->PollStatus();
+            } catch (Throwable $statusError) {
+                $this->LogError('Statuswiederherstellung nach Aktion fehlgeschlagen', $statusError);
+            }
         }
     }
 
@@ -206,6 +212,11 @@ class DRUKamin extends IPSModule
 
         $data = json_encode([
             'values' => $values,
+            'statusAvailable' => $this->ReadAttributeInteger('StatusUpdatedAt') > 0
+                && (time() - $this->ReadAttributeInteger('StatusUpdatedAt')) <= 120
+                && $this->ReadParentConnectionID() !== 0,
+            'statusRegister' => $this->ReadAttributeInteger('StatusRegister'),
+            'canSetFlameHeight' => $this->CanSetFlameHeight(),
             'features' => [
                 'temperatureControl' => $this->ReadPropertyBoolean('EnableTemperatureControl'),
                 'wave' => $this->ReadPropertyBoolean('EnableWave')
@@ -213,8 +224,7 @@ class DRUKamin extends IPSModule
             'waveSettings' => [
                 'interval' => $this->ReadAttributeInteger('WaveInterval'),
                 'stages' => $this->ReadWavePattern()
-            ],
-            'communicationError' => $this->GetCommunicationError()
+            ]
         ], JSON_THROW_ON_ERROR | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 
         return str_replace(
@@ -312,7 +322,7 @@ class DRUKamin extends IPSModule
             $this->DeleteVariableIfPresent('RoomTemperature');
         }
 
-        $this->RegisterVariableString('CommunicationError', 'Modbus-Status', '', 100);
+        $this->DeleteVariableIfPresent('CommunicationError');
     }
 
     private function SyncBooleanVariable(
@@ -365,6 +375,8 @@ class DRUKamin extends IPSModule
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
+        $this->WriteAttributeInteger('StatusRegister', $status);
+        $this->WriteAttributeInteger('StatusUpdatedAt', time());
         $this->RecordMainBurnerState(($status & (1 << 2)) !== 0);
         $this->SetBooleanValueIfPresent('FireplaceFault', ($status & 1) !== 0);
         $this->SetBooleanValueIfPresent('SecondBurner', ($status & (1 << 3)) !== 0);
@@ -389,7 +401,6 @@ class DRUKamin extends IPSModule
             }
         }
 
-        $this->SetCommunicationError('');
     }
 
     private function SetBooleanValueIfPresent(string $ident, bool $value): void
@@ -418,8 +429,11 @@ class DRUKamin extends IPSModule
 
     private function SetMainBurner(bool $turnOn): void
     {
-        if ($turnOn && $this->IsTemperatureControlActive()) {
-            throw new Exception('Im Temperaturmodus wird der Brenner vom Kamin geregelt. Waehlen Sie zuerst den manuellen Modus.');
+        if ($turnOn) {
+            $status = $this->ReadRegister(self::STATUS_REGISTER);
+            if ((($status >> 13) & 0b11) === 0b10) {
+                throw new Exception('Im Temperaturmodus wird der Brenner vom Kamin geregelt.');
+            }
         }
 
         if (!$turnOn) {
@@ -450,9 +464,7 @@ class DRUKamin extends IPSModule
         if (($status & 1) !== 0) {
             throw new Exception('Der Kamin meldet einen Fehler. Die Zuendung wurde abgebrochen.');
         }
-        if ((($status >> 13) & 0b11) === 0b10) {
-            throw new Exception('Der Hauptbrenner wird im Temperaturmodus vom Kamin geregelt.');
-        }
+
         if (($status & (1 << 2)) !== 0) {
             return;
         }
@@ -814,21 +826,27 @@ class DRUKamin extends IPSModule
         }
     }
 
-    private function SetCommunicationError(string $message): void
+    private function CanSetFlameHeight(): bool
     {
-        $variableId = $this->FindVariableId('CommunicationError');
-        if ($variableId !== 0) {
-            SetValue($variableId, $message);
-        }
-        if ($message !== '') {
-            $this->SendDebug('Modbus-Fehler', $message, 0);
-            IPS_LogMessage('DRU Kamin', $message);
-        }
+        $statusUpdatedAt = $this->ReadAttributeInteger('StatusUpdatedAt');
+        $status = $this->ReadAttributeInteger('StatusRegister');
+        $now = time();
+
+        return $statusUpdatedAt > 0
+            && $now - $statusUpdatedAt <= 120
+            && ($status & 1) === 0
+            && ($status & (1 << 2)) !== 0
+            && ($status & (1 << 9)) === 0
+            && (($status >> 13) & 0b11) !== 0b10
+            && ($status & (1 << 10)) === 0
+            && $now - $this->ReadAttributeInteger('LastIgnitionAt') >= 10
+            && $now - $this->ReadAttributeInteger('LastFlameWrite') >= 10;
     }
 
-    private function GetCommunicationError(): string
+    private function LogError(string $context, Throwable $error): void
     {
-        $variableId = $this->FindVariableId('CommunicationError');
-        return $variableId === 0 ? 'Noch nicht verbunden' : (string) GetValue($variableId);
+        $message = $context . ': ' . $error->getMessage();
+        $this->SendDebug('Fehler', $message, 0);
+        IPS_LogMessage('DRU Kamin', $message);
     }
 }
