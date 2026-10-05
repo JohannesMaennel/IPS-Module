@@ -1,25 +1,21 @@
 (() => {
     const payload = document.getElementById("druData");
-    const data = JSON.parse(payload.textContent);
-    const values = data.values || {};
-    const features = data.features || {};
-    const waveSettings = data.waveSettings || { interval: 10, stages: Array(20).fill(50) };
+    let data = JSON.parse(payload.textContent);
+    let values = data.values || {};
+    let features = data.features || {};
+    let waveSettings = data.waveSettings || { interval: 10, stages: Array(20).fill(50) };
     const controls = document.getElementById("controls");
     const statusLabel = document.getElementById("connectionStatus");
     const temperature = document.getElementById("temperature");
-    const status = Number(data.statusRegister || 0);
-    const statusAvailable = Boolean(data.statusAvailable);
-    const mainBurnerOn = (status & (1 << 2)) !== 0;
-    const fault = (status & 1) !== 0;
-    const ignitionForbidden = (status & (1 << 15)) !== 0;
-    const waveActive = (status & (1 << 9)) !== 0;
-    const temperatureState = (status >> 13) & 0b11;
-    const temperatureActive = temperatureState === 0b10;
-    const operationMode = temperatureActive
-        ? "temperature"
-        : waveActive
-            ? "wave"
-            : "manual";
+    let status = 0;
+    let statusAvailable = false;
+    let mainBurnerOn = false;
+    let fault = false;
+    let ignitionForbidden = false;
+    let waveActive = false;
+    let temperatureState = 0;
+    let temperatureActive = false;
+    let operationMode = "manual";
 
     const toggleLabels = {
         Fireplace: "Hauptbrenner",
@@ -28,24 +24,50 @@
         BoostFan: "Boost-Lüfter"
     };
 
-    if (!statusAvailable) {
-        statusLabel.textContent = "Kein aktueller Modbus-Status – Steuerung gesperrt";
-        statusLabel.classList.add("error");
-    } else if (fault) {
-        statusLabel.textContent = "Kaminfehler erkannt";
-        statusLabel.classList.add("error");
-    } else {
-        statusLabel.textContent = "Verbunden";
-    }
-
-    if (values.RoomTemperature !== undefined) {
-        temperature.textContent = `${Number(values.RoomTemperature).toFixed(1)} °C`;
-    }
-
     function sendAction(ident, value) {
         statusLabel.textContent = "Befehl gesendet – warte auf Rückmeldung";
         requestAction(ident, value);
     }
+
+    function applyData(nextData) {
+        data = nextData;
+        values = data.values || {};
+        features = data.features || {};
+        waveSettings = data.waveSettings || waveSettings;
+        status = Number(data.statusRegister || 0);
+        statusAvailable = Boolean(data.statusAvailable);
+        mainBurnerOn = (status & (1 << 2)) !== 0;
+        fault = (status & 1) !== 0;
+        ignitionForbidden = (status & (1 << 15)) !== 0;
+        waveActive = (status & (1 << 9)) !== 0;
+        temperatureState = (status >> 13) & 0b11;
+        temperatureActive = temperatureState === 0b10;
+        operationMode = temperatureActive
+            ? "temperature"
+            : waveActive
+                ? "wave"
+                : "manual";
+
+        statusLabel.classList.remove("error");
+        if (data.message) {
+            statusLabel.textContent = data.message;
+        } else if (!statusAvailable) {
+            statusLabel.textContent = "Kein aktueller Modbus-Status – Steuerung gesperrt";
+            statusLabel.classList.add("error");
+        } else if (fault) {
+            statusLabel.textContent = "Kaminfehler erkannt";
+            statusLabel.classList.add("error");
+        } else {
+            statusLabel.textContent = "Verbunden";
+        }
+
+        temperature.textContent = values.RoomTemperature === undefined
+            ? ""
+            : `${Number(values.RoomTemperature).toFixed(1)} °C`;
+        render();
+    }
+
+    window.handleMessage = applyData;
 
     function render() {
         controls.replaceChildren();
@@ -263,5 +285,5 @@
         controls.appendChild(editor);
     }
 
-    render();
+    applyData(data);
 })();

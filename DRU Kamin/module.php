@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 class DRUKamin extends IPSModule
 {
+    private bool $actionFailed = false;
+
     private const MODBUS_GATEWAY_MODULE_ID = '{A5F663AB-C400-4FE5-B207-4D67CC030564}';
     private const MODBUS_GATEWAY_DATA_ID = '{E310B701-4AE7-458E-B618-EC13A1A6F6A8}';
     private const STATUS_REGISTER = 40203;
@@ -66,6 +68,8 @@ class DRUKamin extends IPSModule
 
     public function RequestAction($Ident, $Value)
     {
+        $this->actionFailed = false;
+
         if ($Ident === 'PollStatus') {
             try {
                 $this->PollStatus();
@@ -79,45 +83,64 @@ class DRUKamin extends IPSModule
             switch ($Ident) {
                 case 'Fireplace':
                     $this->RequireFeature('EnableFireplace', 'Kamin');
-                    $this->SetMainBurner((bool) $Value);
+                    if (!$this->actionFailed) {
+                        $this->SetMainBurner((bool) $Value);
+                    }
                     break;
                 case 'SecondBurner':
                     $this->RequireFeature('EnableSecondBurner', 'Zweiter Brenner');
-                    $this->SetSecondBurner((bool) $Value);
+                    if (!$this->actionFailed) {
+                        $this->SetSecondBurner((bool) $Value);
+                    }
                     break;
                 case 'Light':
                     $this->RequireFeature('EnableLight', 'Licht');
-                    $this->SetAccessory((bool) $Value, 103, 5, 'Light');
+                    if (!$this->actionFailed) {
+                        $this->SetAccessory((bool) $Value, 103, 5, 'Light');
+                    }
                     break;
                 case 'BoostFan':
                     $this->RequireFeature('EnableBoostFan', 'Boost-Lüfter');
-                    $this->SetAccessory((bool) $Value, 104, 6, 'BoostFan');
+                    if (!$this->actionFailed) {
+                        $this->SetAccessory((bool) $Value, 104, 6, 'BoostFan');
+                    }
                     break;
                 case 'Wave':
                     $this->RequireFeature('EnableWave', 'Wave');
-                    $this->SetOperationMode((bool) $Value ? 'wave' : 'manual');
+                    if (!$this->actionFailed) {
+                        $this->SetOperationMode((bool) $Value ? 'wave' : 'manual');
+                    }
                     break;
                 case 'TemperatureControl':
                     $this->RequireFeature('EnableTemperatureControl', 'Temperaturregelung');
-                    $this->SetOperationMode((bool) $Value ? 'temperature' : 'manual');
+                    if (!$this->actionFailed) {
+                        $this->SetOperationMode((bool) $Value ? 'temperature' : 'manual');
+                    }
                     break;
                 case 'OperationMode':
                     $this->SetOperationMode((string) $Value);
                     break;
                 case 'FlameHeight':
                     $this->RequireFeature('EnableFireplace', 'Kamin');
-                    $this->SetFlameHeight((int) $Value);
+                    if (!$this->actionFailed) {
+                        $this->SetFlameHeight((int) $Value);
+                    }
                     break;
                 case 'TemperatureSetpoint':
                     $this->RequireFeature('EnableTemperatureControl', 'Temperaturregelung');
-                    $this->SetTemperatureSetpoint((float) $Value);
+                    if (!$this->actionFailed) {
+                        $this->SetTemperatureSetpoint((float) $Value);
+                    }
                     break;
                 case 'SaveWaveSettings':
                     $this->RequireFeature('EnableWave', 'Wave');
-                    $this->SaveWaveSettings((string) $Value);
+                    if (!$this->actionFailed) {
+                        $this->SaveWaveSettings((string) $Value);
+                    }
                     break;
                 default:
-                    throw new Exception('Ungueltiger Ident: ' . $Ident);
+                    $this->LogError('RequestAction', 'Ungueltiger Ident: ' . $Ident);
+                    break;
             }
 
             $this->PollStatus();
@@ -187,7 +210,8 @@ class DRUKamin extends IPSModule
         $js = file_get_contents(__DIR__ . '/UI/app.js');
 
         if (!is_string($html) || !is_string($css) || !is_string($js)) {
-            throw new Exception('Die HTML-SDK-Dateien im UI-Ordner konnten nicht geladen werden.');
+            $this->LogError('Visualisierung', 'Die HTML-SDK-Dateien im UI-Ordner konnten nicht geladen werden.');
+            return '';
         }
 
         $featureIdents = [
@@ -325,12 +349,8 @@ class DRUKamin extends IPSModule
         $this->DeleteVariableIfPresent('CommunicationError');
     }
 
-    private function SyncBooleanVariable(
-        string $ident,
-        string $name,
-        bool $enabled,
-        int $position
-    ): void {
+    private function SyncBooleanVariable(string $ident, string $name, bool $enabled, int $position): void
+    {
         if ($enabled) {
             $this->RegisterVariableBoolean($ident, $name, '~Switch', $position);
             $this->EnableAction($ident);
@@ -370,11 +390,16 @@ class DRUKamin extends IPSModule
 
     private function PollStatus(): void
     {
+        $this->actionFailed = false;
         if ($this->ReadParentConnectionID() === 0) {
-            throw new Exception('Kein Modbus-Gateway verbunden.');
+            $this->LogError('Statusabfrage', 'Kein Modbus-Gateway verbunden.');
+            return;
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
         $this->WriteAttributeInteger('StatusRegister', $status);
         $this->WriteAttributeInteger('StatusUpdatedAt', time());
         $this->RecordMainBurnerState(($status & (1 << 2)) !== 0);
@@ -389,7 +414,11 @@ class DRUKamin extends IPSModule
         );
 
         if ($this->ReadPropertyBoolean('EnableTemperatureControl')) {
-            $roomTemperature = $this->ReadRegister(40207) / 10;
+            $roomTemperatureRaw = $this->ReadRegister(40207);
+            if ($this->actionFailed) {
+                return;
+            }
+            $roomTemperature = $roomTemperatureRaw / 10;
             $roomTemperatureId = $this->FindVariableId('RoomTemperature');
             if ($roomTemperatureId !== 0) {
                 SetValue($roomTemperatureId, $roomTemperature);
@@ -397,7 +426,11 @@ class DRUKamin extends IPSModule
 
             $setpointId = $this->FindVariableId('TemperatureSetpoint');
             if ($setpointId !== 0) {
-                SetValue($setpointId, $this->ReadRegister(40250) / 10);
+                $setpointRaw = $this->ReadRegister(40250);
+                if ($this->actionFailed) {
+                    return;
+                }
+                SetValue($setpointId, $setpointRaw / 10);
             }
         }
 
@@ -429,102 +462,191 @@ class DRUKamin extends IPSModule
 
     private function SetMainBurner(bool $turnOn): void
     {
+        $this->LogIgnitionStep('SetMainBurner gestartet; Sollzustand=' . ($turnOn ? 'EIN' : 'AUS'));
         if ($turnOn) {
             $status = $this->ReadRegister(self::STATUS_REGISTER);
-            if ((($status >> 13) & 0b11) === 0b10) {
-                throw new Exception('Im Temperaturmodus wird der Brenner vom Kamin geregelt.');
+            if ($this->actionFailed) {
+                return;
             }
-        }
-
-        if (!$turnOn) {
-            $status = $this->ReadRegister(self::STATUS_REGISTER);
-            if (($status & (1 << 3)) !== 0) {
-                $this->WriteRegister(self::COMMAND_REGISTER, 4);
-                $this->WaitForStatusBit(3, false, 'Der zweite Brenner konnte nicht ausgeschaltet werden.');
-            }
-            if (($status & (1 << 9)) !== 0) {
-                $this->WriteRegister(self::COMMAND_REGISTER, 7);
-            }
-            if ((($status >> 13) & 0b11) === 0b10) {
-                $this->WriteRegister(self::COMMAND_REGISTER, 8);
-                $this->SetBooleanValueIfPresent('TemperatureControl', false);
-            }
-
-            $this->WriteRegister(self::COMMAND_REGISTER, 3);
-            $this->WaitForStatusBit(2, false, 'Der Hauptbrenner konnte nicht ausgeschaltet werden.');
+            $this->LogIgnitionStep('Status vor Zündung gelesen', $status);
+            $this->IgniteMainBurner();
             return;
         }
 
-        $this->IgniteMainBurner();
+        $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
+
+        $this->LogIgnitionStep('Ausschaltstatus gelesen', $status);
+        if (($status & (1 << 3)) !== 0) {
+            $this->LogIgnitionStep('Zweiter Brenner aktiv; sende Kommando 4 zum Ausschalten');
+            $this->WriteRegister(self::COMMAND_REGISTER, 4);
+            if ($this->actionFailed || !$this->WaitForStatusBit(3, false, 'Der zweite Brenner konnte nicht ausgeschaltet werden.')) {
+                return;
+            }
+        }
+        if (($status & (1 << 9)) !== 0) {
+            $this->LogIgnitionStep('Wave aktiv; sende Kommando 7 zum Beenden');
+            $this->WriteRegister(self::COMMAND_REGISTER, 7);
+            if ($this->actionFailed) {
+                return;
+            }
+        }
+        if ((($status >> 13) & 0b11) === 0b10) {
+            $this->LogIgnitionStep('Temperaturregelung aktiv; sende Kommando 8 zum Beenden');
+            $this->WriteRegister(self::COMMAND_REGISTER, 8);
+            if ($this->actionFailed) {
+                return;
+            }
+            $this->SetBooleanValueIfPresent('TemperatureControl', false);
+        }
+
+        $this->LogIgnitionStep('Sende Kommando 3 zum Ausschalten des Hauptbrenners');
+        $this->WriteRegister(self::COMMAND_REGISTER, 3);
+        if (!$this->actionFailed) {
+            $this->WaitForStatusBit(2, false, 'Der Hauptbrenner konnte nicht ausgeschaltet werden.');
+        }
     }
 
     private function IgniteMainBurner(): void
     {
+        $this->LogIgnitionStep('Zündablauf gestartet');
         $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            $this->LogIgnitionStep('Abbruch: Statusregister konnte nicht gelesen werden');
+            return;
+        }
+        $this->LogIgnitionStep('Erststatus gelesen', $status);
         if (($status & 1) !== 0) {
-            throw new Exception('Der Kamin meldet einen Fehler. Die Zuendung wurde abgebrochen.');
+            $this->LogError('Zündablauf', 'Kaminfehlerbit ist gesetzt; Zündung wird abgebrochen.');
+            return;
         }
 
         if (($status & (1 << 2)) !== 0) {
+            $this->LogIgnitionStep('Hauptbrenner ist laut Statusregister bereits eingeschaltet', $status);
             return;
         }
+        $this->LogIgnitionStep('Prüfe Zündfreigabe (Statusbit 15)', $status);
         $status = $this->WaitForIgnitionAllowed($status);
+        if ($this->actionFailed) {
+            $this->LogIgnitionStep('Abbruch beim Warten auf Zündfreigabe');
+            return;
+        }
+        $this->LogIgnitionStep('Zündfreigabe erteilt', $status);
         if (($status & 1) !== 0) {
-            throw new Exception('Der Kamin meldet einen Fehler. Die Zuendung wurde abgebrochen.');
+            $this->LogError('Zündablauf', 'Kaminfehlerbit ist nach der Freigabe gesetzt.');
+            return;
         }
         if (($status & (1 << 2)) !== 0) {
+            $this->LogIgnitionStep('Hauptbrenner wurde während der Freigabe bereits eingeschaltet', $status);
             return;
         }
 
-        try {
-            if (($status & (1 << 1)) === 0) {
-                $this->WriteRegister(self::COMMAND_REGISTER, 100);
-                $this->WaitForStatusBit(1, true, 'Die Zuendung der Pilotflamme ist fehlgeschlagen.');
+        if (($status & (1 << 1)) === 0) {
+            $this->LogIgnitionStep('Pilotflamme aus; sende Kommando 100');
+            $this->WriteRegister(self::COMMAND_REGISTER, 100);
+            if ($this->actionFailed) {
+                $this->LogIgnitionStep('Abbruch: Kommando 100 konnte nicht gesendet werden');
+                $this->AbortIgnition('Kommando 100 konnte nicht bestätigt werden');
+                return;
             }
-            $status = $this->ReadRegister(self::STATUS_REGISTER);
-            if (($status & 1) !== 0) {
-                throw new Exception('Der Kamin meldet einen Fehler. Die Zuendung wurde abgebrochen.');
+            $this->LogIgnitionStep('Warte auf Pilotflammen-Rückmeldung (Statusbit 1)');
+            if (!$this->WaitForStatusBit(1, true, 'Zündung der Pilotflamme ist fehlgeschlagen.')) {
+                $this->AbortIgnition('Pilotflamme wurde nicht bestätigt');
+                return;
             }
-            if (($status & (1 << 15)) !== 0) {
-                throw new Exception('Der Kamin meldet, dass die Zuendung derzeit nicht erlaubt ist.');
-            }
-            $this->WriteRegister(self::COMMAND_REGISTER, 101);
-            $this->WaitForStatusBit(2, true, 'Der Hauptbrenner konnte nicht gezuendet werden.');
-        } catch (Throwable $error) {
-            try {
-                $this->WriteRegister(self::COMMAND_REGISTER, 3);
-            } catch (Throwable $cleanupError) {
-                $this->SendDebug('Sicheres Ausschalten fehlgeschlagen', $cleanupError->getMessage(), 0);
-                IPS_LogMessage('DRU Kamin', 'Sicheres Ausschalten fehlgeschlagen: ' . $cleanupError->getMessage());
-            }
-            throw $error;
+            $this->LogIgnitionStep('Pilotflamme wurde bestätigt');
+        } else {
+            $this->LogIgnitionStep('Pilotflamme ist bereits aktiv', $status);
+        }
+
+        $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            $this->LogIgnitionStep('Abbruch: Status nach Pilotflamme konnte nicht gelesen werden');
+            $this->AbortIgnition('Status nach Pilotflamme konnte nicht gelesen werden');
+            return;
+        }
+        $this->LogIgnitionStep('Status nach Pilotflamme gelesen', $status);
+        if (($status & 1) !== 0) {
+            $this->LogError('Zündablauf', 'Kaminfehler nach Pilotflamme; Hauptbrenner wird nicht gezündet.');
+            $this->AbortIgnition('Kaminfehler nach Pilotflamme');
+            return;
+        }
+
+        $this->LogIgnitionStep('Prüfe Zündfreigabe vor Hauptbrenner (Statusbit 15)', $status);
+        $status = $this->WaitForIgnitionAllowed($status);
+        if ($this->actionFailed) {
+            $this->LogIgnitionStep('Abbruch beim Warten auf Freigabe für Hauptbrenner');
+            $this->AbortIgnition('Freigabe für Hauptbrenner wurde nicht erteilt');
+            return;
+        }
+        $this->LogIgnitionStep('Freigabe für Hauptbrenner erteilt', $status);
+        if (($status & 1) !== 0) {
+            $this->LogError('Zündablauf', 'Kaminfehler vor Hauptbrenner-Zündung.');
+            $this->AbortIgnition('Kaminfehler vor Hauptbrenner-Zündung');
+            return;
+        }
+        if (($status & (1 << 2)) !== 0) {
+            $this->LogIgnitionStep('Hauptbrenner wurde bereits eingeschaltet', $status);
+            $this->WriteAttributeInteger('LastIgnitionAt', time());
+            return;
+        }
+
+        $this->LogIgnitionStep('Sende Kommando 101 zum Einschalten des Hauptbrenners');
+        $this->WriteRegister(self::COMMAND_REGISTER, 101);
+        if ($this->actionFailed) {
+            $this->LogIgnitionStep('Abbruch: Kommando 101 konnte nicht gesendet werden');
+            $this->AbortIgnition('Kommando 101 konnte nicht bestätigt werden');
+            return;
+        }
+        $this->LogIgnitionStep('Warte auf Hauptbrenner-Rückmeldung (Statusbit 2)');
+        if (!$this->WaitForStatusBit(2, true, 'Hauptbrenner konnte nicht gezündet werden.')) {
+            $this->LogIgnitionStep('Zeitüberschreitung: keine Bestätigung des Hauptbrenners');
+            $this->AbortIgnition('Hauptbrenner wurde nicht bestätigt');
+            return;
         }
 
         $this->WriteAttributeInteger('LastIgnitionAt', time());
+        $this->LogIgnitionStep('Zündablauf erfolgreich abgeschlossen');
     }
 
     private function SetSecondBurner(bool $turnOn): void
     {
         if ($turnOn) {
             $status = $this->ReadRegister(self::STATUS_REGISTER);
+            if ($this->actionFailed) {
+                return;
+            }
             if (($status & 1) !== 0) {
-                throw new Exception('Der Kamin meldet einen Fehler. Der zweite Brenner wurde nicht eingeschaltet.');
+                $this->LogError('Zweiter Brenner', 'Kaminfehlerbit gesetzt; zweiter Brenner bleibt ausgeschaltet.');
+                return;
             }
             if (($status & (1 << 2)) === 0) {
                 $this->IgniteMainBurner();
+                if ($this->actionFailed) {
+                    return;
+                }
             }
             $this->WriteRegister(self::COMMAND_REGISTER, 102);
-            $this->WaitForStatusBit(3, true, 'Der zweite Brenner konnte nicht eingeschaltet werden.');
+            if (!$this->actionFailed) {
+                $this->WaitForStatusBit(3, true, 'Der zweite Brenner konnte nicht eingeschaltet werden.');
+            }
             return;
         }
 
         $this->WriteRegister(self::COMMAND_REGISTER, 4);
-        $this->WaitForStatusBit(3, false, 'Der zweite Brenner konnte nicht ausgeschaltet werden.');
+        if (!$this->actionFailed) {
+            $this->WaitForStatusBit(3, false, 'Der zweite Brenner konnte nicht ausgeschaltet werden.');
+        }
     }
 
     private function SetAccessory(bool $turnOn, int $onCommand, int $offCommand, string $ident): void
     {
         $this->WriteRegister(self::COMMAND_REGISTER, $turnOn ? $onCommand : $offCommand);
+        if ($this->actionFailed) {
+            return;
+        }
         $statusBit = [
             'Light' => 8,
             'BoostFan' => 7,
@@ -540,19 +662,25 @@ class DRUKamin extends IPSModule
     private function SetOperationMode(string $mode): void
     {
         if (!in_array($mode, ['manual', 'temperature', 'wave'], true)) {
-            throw new Exception('Ungueltiger Betriebsmodus: ' . $mode);
+            $this->LogError('Betriebsart', 'Ungueltiger Betriebsmodus: ' . $mode);
+            return;
         }
 
         if (
             ($mode === 'temperature' && !$this->ReadPropertyBoolean('EnableTemperatureControl'))
             || ($mode === 'wave' && !$this->ReadPropertyBoolean('EnableWave'))
         ) {
-            throw new Exception('Der ausgewaehlte Betriebsmodus ist nicht aktiviert.');
+            $this->LogError('Betriebsart', 'Der ausgewaehlte Betriebsmodus ist nicht aktiviert.');
+            return;
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
         if (($status & 1) !== 0) {
-            throw new Exception('Der Kamin meldet einen Fehler. Der Betriebsmodus wurde nicht geaendert.');
+            $this->LogError('Betriebsart', 'Kaminfehlerbit gesetzt; Betriebsmodus wurde nicht geändert.');
+            return;
         }
 
         $temperatureState = ($status >> 13) & 0b11;
@@ -564,51 +692,70 @@ class DRUKamin extends IPSModule
             ) {
                 return;
             }
-            throw new Exception('Der Betriebsmodus kann erst nach dem Zuenden des Hauptbrenners gewechselt werden.');
+            $this->LogError('Betriebsart', 'Moduswechsel erst nach Zündung des Hauptbrenners möglich.');
+            return;
         }
 
         if ($mode !== 'wave' && $waveActive) {
             $this->WriteRegister(self::COMMAND_REGISTER, 7);
-            $this->WaitForStatusBit(9, false, 'Wave konnte nicht beendet werden.');
+            if ($this->actionFailed || !$this->WaitForStatusBit(9, false, 'Wave konnte nicht beendet werden.')) {
+                return;
+            }
         }
 
         if ($mode !== 'temperature' && $temperatureState === 0b10) {
             $this->WriteRegister(self::COMMAND_REGISTER, 8);
-            $this->WaitForTemperatureControl(false);
+            if ($this->actionFailed || !$this->WaitForTemperatureControl(false)) {
+                return;
+            }
         }
 
         if ($mode === 'temperature') {
             if ($temperatureState === 0b00) {
-                throw new Exception('Der Kamin meldet, dass Temperaturregelung nicht verfuegbar ist.');
+                $this->LogError('Betriebsart', 'Der Kamin meldet, dass Temperaturregelung nicht verfügbar ist.');
+                return;
             }
             if ($temperatureState === 0b11) {
-                throw new Exception('Der Kamin meldet einen Fehler der Temperaturregelung.');
+                $this->LogError('Betriebsart', 'Der Kamin meldet einen Fehler der Temperaturregelung.');
+                return;
             }
             if ($temperatureState !== 0b10) {
                 $setpointId = $this->FindVariableId('TemperatureSetpoint');
                 if ($setpointId !== 0) {
                     $setpoint = (float) GetValue($setpointId);
                     $this->WriteRegister(40250, (int) round($setpoint * 10));
+                    if ($this->actionFailed) {
+                        return;
+                    }
                 }
                 $this->WriteRegister(self::COMMAND_REGISTER, 106);
-                $this->WaitForTemperatureControl(true);
+                if ($this->actionFailed || !$this->WaitForTemperatureControl(true)) {
+                    return;
+                }
             }
         } elseif ($mode === 'wave' && !$waveActive) {
             $this->WriteRegister(self::COMMAND_REGISTER, 105);
-            $this->WaitForStatusBit(9, true, 'Wave konnte nicht aktiviert werden.');
+            if (!$this->actionFailed) {
+                $this->WaitForStatusBit(9, true, 'Wave konnte nicht aktiviert werden.');
+            }
         }
     }
 
-    private function WaitForTemperatureControl(bool $expected): void
+    private function WaitForTemperatureControl(bool $expected): bool
     {
         for ($attempt = 0; $attempt < 10; $attempt++) {
-            $state = ($this->ReadRegister(self::STATUS_REGISTER) >> 13) & 0b11;
+            $status = $this->ReadRegister(self::STATUS_REGISTER);
+            if ($this->actionFailed) {
+                return false;
+            }
+            $state = ($status >> 13) & 0b11;
             if (($state === 0b10) === $expected) {
-                return;
+                return true;
             }
 
             if ($state === 0b11) {
-                throw new Exception('Der Kamin meldet einen Fehler der Temperaturregelung.');
+                $this->LogError('Temperaturregelung', 'Der Kamin meldet einen Fehler der Temperaturregelung.');
+                return false;
             }
 
             if ($attempt < 9) {
@@ -616,33 +763,43 @@ class DRUKamin extends IPSModule
             }
         }
 
-        throw new Exception(
+        $this->LogError(
+            'Temperaturregelung',
             $expected
                 ? 'Die Temperaturregelung wurde vom Kamin nicht aktiviert.'
                 : 'Die Temperaturregelung wurde vom Kamin nicht beendet.'
         );
+        return false;
     }
 
     private function SaveWaveSettings(string $json): void
     {
-        $settings = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        $settings = json_decode($json, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->LogError('Wave-Einstellungen', 'JSON konnte nicht gelesen werden: ' . json_last_error_msg());
+            return;
+        }
         if (!is_array($settings) || !isset($settings['interval'], $settings['stages'])) {
-            throw new Exception('Die Wave-Einstellungen sind unvollstaendig.');
+            $this->LogError('Wave-Einstellungen', 'Die Wave-Einstellungen sind unvollständig.');
+            return;
         }
 
         $interval = filter_var($settings['interval'], FILTER_VALIDATE_INT);
         if ($interval === false || $interval < 5 || $interval > 60) {
-            throw new Exception('Das Wave-Intervall muss zwischen 5 und 60 Sekunden liegen.');
+            $this->LogError('Wave-Einstellungen', 'Das Wave-Intervall muss zwischen 5 und 60 Sekunden liegen.');
+            return;
         }
         if (!is_array($settings['stages']) || count($settings['stages']) !== self::WAVE_STAGE_COUNT) {
-            throw new Exception('Das Wave-Muster muss genau 20 Flammenstufen enthalten.');
+            $this->LogError('Wave-Einstellungen', 'Das Wave-Muster muss genau 20 Flammenstufen enthalten.');
+            return;
         }
 
         $percentages = [];
         $stageValues = [];
         foreach (array_values($settings['stages']) as $percentage) {
             if (!is_numeric($percentage) || (float) $percentage < 0 || (float) $percentage > 100) {
-                throw new Exception('Jede Wave-Stufe muss zwischen 0 und 100 Prozent liegen.');
+                $this->LogError('Wave-Einstellungen', 'Jede Wave-Stufe muss zwischen 0 und 100 Prozent liegen.');
+                return;
             }
             $percentage = (int) round((float) $percentage);
             $stage = (int) round($percentage * 14 / 100) + 1;
@@ -651,8 +808,12 @@ class DRUKamin extends IPSModule
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
         if (($status & (1 << 2)) === 0 || ($status & (1 << 9)) === 0) {
-            throw new Exception('Wave-Einstellungen koennen nur bei eingeschaltetem Kamin im Wave-Modus gespeichert werden.');
+            $this->LogError('Wave-Einstellungen', 'Speichern ist nur bei eingeschaltetem Kamin im Wave-Modus möglich.');
+            return;
         }
 
         $registers = [(int) $interval];
@@ -660,6 +821,9 @@ class DRUKamin extends IPSModule
             $registers[] = ($stageValues[$index + 1] << 8) | $stageValues[$index];
         }
         $this->WriteMultipleRegisters(self::WAVE_INTERVAL_REGISTER, $registers);
+        if ($this->actionFailed) {
+            return;
+        }
 
         $this->WriteAttributeInteger('WaveInterval', (int) $interval);
         $this->WriteAttributeString('WavePattern', json_encode($percentages, JSON_THROW_ON_ERROR));
@@ -678,34 +842,47 @@ class DRUKamin extends IPSModule
     private function SetFlameHeight(int $height): void
     {
         if ($height < 0 || $height > 100) {
-            throw new Exception('Die Flammenhoehe muss zwischen 0 und 100 Prozent liegen.');
+            $this->LogError('Flammenhöhe', 'Die Flammenhöhe muss zwischen 0 und 100 Prozent liegen.');
+            return;
         }
 
         $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
         $isOn = ($status & (1 << 2)) !== 0;
         $this->RecordMainBurnerState($isOn);
         if (!$isOn) {
-            throw new Exception('Die Flammenhoehe kann erst nach erfolgreicher Zuendung gesetzt werden.');
+            $this->LogError('Flammenhöhe', 'Kann erst nach erfolgreicher Zündung gesetzt werden.');
+            return;
         }
         if (($status & (1 << 9)) !== 0) {
-            throw new Exception('Die Flammenhoehe kann im Wave-Modus nicht manuell gesetzt werden.');
+            $this->LogError('Flammenhöhe', 'Im Wave-Modus kann die Flammenhöhe nicht manuell gesetzt werden.');
+            return;
         }
         if ((($status >> 13) & 0b11) === 0b10) {
-            throw new Exception('Die Flammenhoehe kann bei aktiver Temperaturregelung nicht manuell gesetzt werden.');
+            $this->LogError('Flammenhöhe', 'Bei aktiver Temperaturregelung kann die Flammenhöhe nicht manuell gesetzt werden.');
+            return;
         }
         if (($status & (1 << 10)) !== 0) {
-            throw new Exception('Der Kamin meldet, dass die Flammenhoehe momentan nicht veraendert werden kann.');
+            $this->LogError('Flammenhöhe', 'Der Kamin sperrt derzeit Änderungen der Flammenhöhe.');
+            return;
         }
 
         $now = time();
         if ($now - $this->ReadAttributeInteger('LastIgnitionAt') < 10) {
-            throw new Exception('Nach der Zuendung muss vor der ersten Flammenhoehen-Aenderung 10 Sekunden gewartet werden.');
+            $this->LogError('Flammenhöhe', 'Nach der Zündung muss vor der Änderung 10 Sekunden gewartet werden.');
+            return;
         }
         if ($now - $this->ReadAttributeInteger('LastFlameWrite') < 10) {
-            throw new Exception('Die Flammenhoehe darf nur einmal innerhalb von 10 Sekunden geschrieben werden.');
+            $this->LogError('Flammenhöhe', 'Die Flammenhöhe darf nur einmal innerhalb von 10 Sekunden geschrieben werden.');
+            return;
         }
 
         $this->WriteRegister(40201, $height);
+        if ($this->actionFailed) {
+            return;
+        }
         $this->WriteAttributeInteger('LastFlameWrite', $now);
         $variableId = $this->FindVariableId('FlameHeight');
         if ($variableId !== 0) {
@@ -716,21 +893,33 @@ class DRUKamin extends IPSModule
     private function SetTemperatureSetpoint(float $temperature): void
     {
         if ($temperature < 5 || $temperature > 35 || abs(($temperature * 2) - round($temperature * 2)) > 0.001) {
-            throw new Exception('Die Solltemperatur muss zwischen 5 und 35 °C in 0,5-°C-Schritten liegen.');
+            $this->LogError('Solltemperatur', 'Die Solltemperatur muss zwischen 5 und 35 °C in 0,5-°C-Schritten liegen.');
+            return;
         }
         $this->WriteRegister(40250, (int) round($temperature * 10));
+        if ($this->actionFailed) {
+            return;
+        }
         $variableId = $this->FindVariableId('TemperatureSetpoint');
         if ($variableId !== 0) {
             SetValue($variableId, $temperature);
         }
     }
 
-    private function WaitForStatusBit(int $bit, bool $expected, string $errorMessage): void
+    private function WaitForStatusBit(int $bit, bool $expected, string $errorMessage): bool
     {
         for ($attempt = 0; $attempt < 10; $attempt++) {
             $status = $this->ReadRegister(self::STATUS_REGISTER);
+            if ($this->actionFailed) {
+                return false;
+            }
+            $this->SendDebug(
+                'Statusrückmeldung',
+                sprintf('Warte auf Bit %d=%d, Versuch %d/10; Status 40203=%d', $bit, $expected ? 1 : 0, $attempt + 1, $status),
+                0
+            );
             if ((($status & (1 << $bit)) !== 0) === $expected) {
-                return;
+                return true;
             }
 
             if ($attempt < 9) {
@@ -738,91 +927,41 @@ class DRUKamin extends IPSModule
             }
         }
 
-        throw new Exception($errorMessage);
+        $this->LogError('Statusrückmeldung', $errorMessage);
+        return false;
     }
 
     private function WaitForIgnitionAllowed(int $status): int
     {
         for ($attempt = 0; ($status & (1 << 15)) !== 0; $attempt++) {
+            $this->SendDebug(
+                'Zündfreigabe',
+                sprintf('Freigabe fehlt, Versuch %d/60; Status 40203=%d', $attempt + 1, $status),
+                0
+            );
             if (($status & 1) !== 0) {
-                throw new Exception('Der Kamin meldet einen Fehler. Die Zuendung wurde abgebrochen.');
+                $this->LogError('Zündfreigabe', 'Kaminfehlerbit gesetzt; Zündung wird abgebrochen.');
+                return -1;
             }
             if ($attempt >= 60) {
-                throw new Exception('Der Kamin hat die Zuendung innerhalb von fuenf Minuten nicht freigegeben.');
+                $this->LogError('Zündfreigabe', 'Der Kamin hat die Zündung innerhalb von fünf Minuten nicht freigegeben.');
+                return -1;
             }
 
             IPS_Sleep(5000);
             $status = $this->ReadRegister(self::STATUS_REGISTER);
+            if ($this->actionFailed) {
+                return -1;
+            }
         }
 
         return $status;
     }
 
-    private function ReadRegister(int $register): int
-    {
-        // DRU expects the documented register number as-is, not a 40001-relative offset.
-        $response = $this->SendDataToParent(json_encode([
-            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
-            'Function' => 3,
-            'Address' => $register,
-            'Quantity' => 1,
-            'Data' => ''
-        ], JSON_THROW_ON_ERROR));
-
-        if (!is_string($response) || $response === '') {
-            throw new Exception('Keine gueltige Antwort auf Modbus-Leseregister ' . $register . '.');
-        }
-
-        if (strlen($response) < 4) {
-            throw new Exception('Unerwartetes Modbus-Antwortformat fuer Register ' . $register . '.');
-        }
-
-        $value = unpack('nvalue', substr($response, 2, 2));
-        if (!is_array($value) || !isset($value['value'])) {
-            throw new Exception('Der Wert von Modbus-Register ' . $register . ' ist ungueltig.');
-        }
-
-        return (int) $value['value'];
-    }
-
-    private function WriteRegister(int $register, int $value): void
-    {
-        $response = $this->SendDataToParent(json_encode([
-            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
-            'Function' => 6,
-            'Address' => $register,
-            'Quantity' => 1,
-            'Data' => bin2hex(pack('n', $value))
-        ], JSON_THROW_ON_ERROR));
-
-        if ($response === false) {
-            throw new Exception('Keine gueltige Antwort auf Modbus-Schreibregister ' . $register . '.');
-        }
-    }
-
-    private function WriteMultipleRegisters(int $register, array $values): void
-    {
-        if (count($values) === 0 || count($values) > 123) {
-            throw new Exception('Ungueltige Anzahl von Modbus-Registern fuer einen Sammelschreibvorgang.');
-        }
-
-        $response = $this->SendDataToParent(json_encode([
-            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
-            'Function' => 16,
-            'Address' => $register,
-            'Quantity' => count($values),
-            'Data' => bin2hex(pack('n*', ...$values))
-        ], JSON_THROW_ON_ERROR));
-
-        if ($response === false) {
-            throw new Exception('Die Wave-Einstellungen konnten nicht an das Modbus-Gateway gesendet werden.');
-        }
-    }
-
     private function RequireFeature(string $property, string $featureName): void
     {
         if (!$this->ReadPropertyBoolean($property)) {
-            throw new Exception('Die Funktion "' . $featureName . '" ist in der Konfiguration deaktiviert.');
+            $this->LogError('Funktionsprüfung', 'Die Funktion "' . $featureName . '" ist in der Konfiguration deaktiviert.');
         }
     }
 
@@ -843,10 +982,104 @@ class DRUKamin extends IPSModule
             && $now - $this->ReadAttributeInteger('LastFlameWrite') >= 10;
     }
 
-    private function LogError(string $context, Throwable $error): void
+    private function ReadRegister(int $register): int
     {
-        $message = $context . ': ' . $error->getMessage();
+        // DRU expects the documented register number as-is, not a 40001-relative offset.
+        $response = $this->SendDataToParent(json_encode([
+            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
+            'Function' => 3,
+            'Address' => $register,
+            'Quantity' => 1,
+            'Data' => ''
+        ], JSON_THROW_ON_ERROR));
+
+        if (!is_string($response) || $response === '') {
+            $this->LogError('Modbus-Lesen', 'Keine gültige Antwort für Register ' . $register . '.');
+            return -1;
+        }
+
+        if (strlen($response) < 4) {
+            $this->LogError('Modbus-Lesen', 'Unerwartetes Antwortformat für Register ' . $register . '.');
+            return -1;
+        }
+
+        $value = unpack('nvalue', substr($response, 2, 2));
+        if (!is_array($value) || !isset($value['value'])) {
+            $this->LogError('Modbus-Lesen', 'Der Wert von Register ' . $register . ' ist ungültig.');
+            return -1;
+        }
+
+        return (int) $value['value'];
+    }
+
+    private function WriteRegister(int $register, int $value): bool
+    {
+        $response = $this->SendDataToParent(json_encode([
+            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
+            'Function' => 6,
+            'Address' => $register,
+            'Quantity' => 1,
+            'Data' => bin2hex(pack('n', $value))
+        ], JSON_THROW_ON_ERROR));
+
+        if ($response === false) {
+            $this->LogError('Modbus-Schreiben', 'Keine gültige Antwort für Register ' . $register . ', Wert ' . $value . '.');
+            return false;
+        }
+
+        return true;
+    }
+
+    private function WriteMultipleRegisters(int $register, array $values): void
+    {
+        if (count($values) === 0 || count($values) > 123) {
+            $this->LogError('Modbus-Sammelschreiben', 'Ungültige Anzahl Register: ' . count($values) . '.');
+            return;
+        }
+
+        $response = $this->SendDataToParent(json_encode([
+            'DataID' => self::MODBUS_GATEWAY_DATA_ID,
+            'Function' => 16,
+            'Address' => $register,
+            'Quantity' => count($values),
+            'Data' => bin2hex(pack('n*', ...$values))
+        ], JSON_THROW_ON_ERROR));
+
+        if ($response === false) {
+            $this->LogError('Modbus-Sammelschreiben', 'Wave-Einstellungen konnten nicht übertragen werden.');
+        }
+    }
+
+    private function LogError(string $context, Throwable|string $error): void
+    {
+        $this->actionFailed = true;
+        $detail = $error instanceof Throwable ? $error->getMessage() : (string) $error;
+        $message = $context . ': ' . $detail;
         $this->SendDebug('Fehler', $message, 0);
         IPS_LogMessage('DRU Kamin', $message);
+    }
+
+    private function LogIgnitionStep(string $message, ?int $status = null): void
+    {
+        if ($status !== null) {
+            $message .= sprintf(
+                ' (40203=%d, Bit 0 Fehler=%d, Bit 1 Pilot=%d, Bit 2 Hauptbrenner=%d, Bit 15 Sperre=%d)',
+                $status,
+                ($status & 1) !== 0 ? 1 : 0,
+                ($status & (1 << 1)) !== 0 ? 1 : 0,
+                ($status & (1 << 2)) !== 0 ? 1 : 0,
+                ($status & (1 << 15)) !== 0 ? 1 : 0
+            );
+        }
+        $this->SendDebug('Zündablauf', $message, 0);
+        IPS_LogMessage('DRU Kamin Zündablauf', $message);
+    }
+
+    private function AbortIgnition(string $reason): void
+    {
+        $this->LogIgnitionStep('Sicherheitsabbruch: ' . $reason . '; sende Kommando 3');
+        if ($this->WriteRegister(self::COMMAND_REGISTER, 3)) {
+            $this->LogIgnitionStep('Kommando 3 für Zündabbruch gesendet');
+        }
     }
 }
