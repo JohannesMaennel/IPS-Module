@@ -434,11 +434,33 @@ class Drucksensor extends IPSModule
             }
 
             $normalizedValue = $this->NormalizeStateValue($definition, $state[$key]);
-            $this->WriteTypedValue($variableID, $definition['type'], $normalizedValue);
+            try {
+                $previousValue = GetValue($variableID);
+                $this->WriteTypedValue($variableID, $definition['type'], $normalizedValue);
+                $storedValue = GetValue($variableID);
+            } catch (Throwable $exception) {
+                $this->Debug('State Schreibfehler', $definition['ident'] . ' (ID ' . $variableID . '): ' . $exception->getMessage(), 0);
+                continue;
+            }
+
+            $this->Debug('State Variable', (string) json_encode([
+                'InstanceID' => $this->InstanceID,
+                'Ident' => $definition['ident'],
+                'VariableID' => $variableID,
+                'Vorher' => $previousValue,
+                'Soll' => $normalizedValue,
+                'Ist' => $storedValue
+            ]), 0);
+
+            if ($storedValue !== $normalizedValue) {
+                $this->Debug('State Schreibfehler', $definition['ident'] . ' (ID ' . $variableID . '): Gespeicherter Wert weicht vom Sollwert ab.', 0);
+                continue;
+            }
+
             $updatedVariables++;
         }
 
-        $this->Debug('State verarbeitet', $updatedVariables . ' Variablen gesetzt; empfangene Felder: ' . implode(', ', array_keys($state)), 0);
+        $this->Debug('State verarbeitet', $updatedVariables . ' Variablen durch Ruecklesen bestaetigt; empfangene Felder: ' . implode(', ', array_keys($state)), 0);
     }
 
     private function SynchronizeConfiguration(array $state): void
