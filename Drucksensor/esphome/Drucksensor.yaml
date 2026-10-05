@@ -104,6 +104,10 @@ mqtt:
 #GPIO03 = Gasuhr
 
 globals:
+  - id: mqtt_update_interval_s
+    type: int
+    restore_value: yes
+    initial_value: '1'
   - id: water_pulses_per_m3
     type: float
     restore_value: yes
@@ -144,6 +148,22 @@ i2c:
     scan: true
 
 number:
+  - platform: template
+    name: "MQTT Updateintervall"
+    id: mqtt_update_interval_number
+    internal: true
+    entity_category: config
+    unit_of_measurement: "s"
+    min_value: 1
+    max_value: 3600
+    step: 1
+    mode: box
+    lambda: |-
+      return id(mqtt_update_interval_s);
+    set_action:
+      - lambda: |-
+          id(mqtt_update_interval_s) = static_cast<int>(x);
+
   - platform: template
     name: "Druck Kalibrierung Spannung 1"
     id: pressure_calibration_voltage_1_number
@@ -455,29 +475,45 @@ output:
 interval:
   - interval: 1s
     then:
-      - mqtt.publish_json:
-          topic: drucksensor/state
-          retain: true
-          payload: |-
-            root["esp_status"] = id(esp_status).state;
-            root["esp_temperature_c"] = id(esp_temperature).state;
-            root["ip_address"] = id(my_ip).state;
-            root["pressure_voltage_v"] = id(pressure_voltage).state;
-            root["pressure_bar"] = id(pressure_bar).state;
-            root["water_pulses_per_m3"] = id(water_pulses_per_m3);
-            root["water_counter_offset_m3"] = id(water_counter_offset_m3);
-            root["water_pulse_rate_imp_min"] = id(water_pulse_rate).state;
-            root["water_total_m3"] = id(water_total_m3).state;
-            root["water_flow_l_min"] = id(water_flow_l_min).state;
-            root["gas_pulses_per_m3"] = id(gas_pulses_per_m3);
-            root["gas_counter_offset_m3"] = id(gas_counter_offset_m3);
-            root["gas_pulse_rate_imp_min"] = id(gas_pulse_rate).state;
-            root["gas_total_m3"] = id(gas_total_m3).state;
-            root["gas_flow_m3_h"] = id(gas_flow_m3_h).state;
-            root["pressure_calibration_voltage_1_v"] = id(pressure_calibration_voltage_1);
-            root["pressure_calibration_bar_1"] = id(pressure_calibration_bar_1);
-            root["pressure_calibration_voltage_2_v"] = id(pressure_calibration_voltage_2);
-            root["pressure_calibration_bar_2"] = id(pressure_calibration_bar_2);
+      - if:
+          condition:
+            and:
+              - mqtt.connected:
+              - lambda: |-
+                  static uint32_t last_publish = 0;
+                  static bool published = false;
+                  const uint32_t now = millis();
+                  const uint32_t interval_ms = static_cast<uint32_t>(id(mqtt_update_interval_s)) * 1000U;
+                  if (published && now - last_publish < interval_ms) {
+                    return false;
+                  }
+                  last_publish = now;
+                  published = true;
+                  return true;
+          then:
+            - mqtt.publish_json:
+                topic: drucksensor/state
+                retain: true
+                payload: |-
+                  root["esp_status"] = id(esp_status).state;
+                  root["esp_temperature_c"] = id(esp_temperature).state;
+                  root["ip_address"] = id(my_ip).state;
+                  root["pressure_voltage_v"] = id(pressure_voltage).state;
+                  root["pressure_bar"] = id(pressure_bar).state;
+                  root["water_pulses_per_m3"] = id(water_pulses_per_m3);
+                  root["water_counter_offset_m3"] = id(water_counter_offset_m3);
+                  root["water_pulse_rate_imp_min"] = id(water_pulse_rate).state;
+                  root["water_total_m3"] = id(water_total_m3).state;
+                  root["water_flow_l_min"] = id(water_flow_l_min).state;
+                  root["gas_pulses_per_m3"] = id(gas_pulses_per_m3);
+                  root["gas_counter_offset_m3"] = id(gas_counter_offset_m3);
+                  root["gas_pulse_rate_imp_min"] = id(gas_pulse_rate).state;
+                  root["gas_total_m3"] = id(gas_total_m3).state;
+                  root["gas_flow_m3_h"] = id(gas_flow_m3_h).state;
+                  root["pressure_calibration_voltage_1_v"] = id(pressure_calibration_voltage_1);
+                  root["pressure_calibration_bar_1"] = id(pressure_calibration_bar_1);
+                  root["pressure_calibration_voltage_2_v"] = id(pressure_calibration_voltage_2);
+                  root["pressure_calibration_bar_2"] = id(pressure_calibration_bar_2);
       - if:
           condition:
             lambda: 'return id(pressure_bar).state > 0.1;'

@@ -418,6 +418,7 @@ class Drucksensor extends IPSModule
     private function ProcessState(array $state): void
     {
         $updatedVariables = 0;
+        $unchangedVariables = 0;
 
         foreach ($this->GetVariableDefinitions() as $definition) {
             $key = $definition['key'];
@@ -436,6 +437,11 @@ class Drucksensor extends IPSModule
             $normalizedValue = $this->NormalizeStateValue($definition, $state[$key]);
             try {
                 $previousValue = GetValue($variableID);
+                if ($previousValue === $normalizedValue) {
+                    $unchangedVariables++;
+                    continue;
+                }
+
                 $this->WriteTypedValue($variableID, $definition['type'], $normalizedValue);
                 $storedValue = GetValue($variableID);
             } catch (Throwable $exception) {
@@ -460,7 +466,7 @@ class Drucksensor extends IPSModule
             $updatedVariables++;
         }
 
-        $this->Debug('State verarbeitet', $updatedVariables . ' Variablen durch Ruecklesen bestaetigt; empfangene Felder: ' . implode(', ', array_keys($state)), 0);
+        $this->Debug('State verarbeitet', $updatedVariables . ' Variablen geaendert und durch Ruecklesen bestaetigt; ' . $unchangedVariables . ' unveraendert; empfangene Felder: ' . implode(', ', array_keys($state)), 0);
     }
 
     private function SynchronizeConfiguration(array $state): void
@@ -567,7 +573,7 @@ class Drucksensor extends IPSModule
         $definition = $this->GetVariableDefinitions()['esp_status'];
         $variableID = @$this->GetIDForIdent($definition['ident']);
 
-        if ($variableID !== false) {
+        if ($variableID !== false && GetValue($variableID) !== $online) {
             SetValue($variableID, $online);
         }
     }
