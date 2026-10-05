@@ -1,4 +1,6 @@
 .vs/ 
+.vscode/
+.venv/
 # ESPHome Secrets
 secrets.yaml
 esphome/secrets.yaml

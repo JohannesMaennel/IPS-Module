@@ -1,0 +1,79 @@
+:root {
+    color-scheme: light dark;
+    font-family: Arial, sans-serif;
+}
+
+body {
+    margin: 0;
+    padding: 16px;
+}
+
+.dru {
+    max-width: 760px;
+    margin: 0 auto;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+h1 {
+    margin: 0;
+    font-size: 1.2rem;
+}
+
+header p {
+    margin: 5px 0 0;
+    color: #888;
+    font-size: 0.85rem;
+}
+
+.temperature {
+    font-size: 1.2rem;
+    font-weight: 600;
+}
+
+#controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+}
+
+button,
+input {
+    font: inherit;
+}
+
+.control {
+    min-height: 54px;
+    padding: 10px 14px;
+    border: 1px solid #8886;
+    border-radius: 8px;
+    background: #8882;
+    color: inherit;
+    cursor: pointer;
+}
+
+.control[aria-pressed="true"] {
+    border-color: #d97706;
+    background: #d9770630;
+}
+
+.range-control {
+    display: grid;
+    grid-column: 1 / -1;
+    gap: 8px;
+    padding: 10px 2px;
+}
+
+.range-control output {
+    font-weight: 600;
+}
+
+.error {
+    color: #c0392b;
+}
