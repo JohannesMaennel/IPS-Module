@@ -5,9 +5,7 @@ declare(strict_types=1);
 class DRUKamin extends IPSModule
 {
     private const MODBUS_GATEWAY_MODULE_ID = '{A5F663AB-C400-4FE5-B207-4D67CC030564}';
-    private const CLIENT_SOCKET_MODULE_ID = '{3CFF0FD9-E306-41DB-9B5A-9D06D38576C3}';
     private const MODBUS_GATEWAY_DATA_ID = '{E310B701-4AE7-458E-B618-EC13A1A6F6A8}';
-    private const DEVICE_UNIT_ID = 2;
     private const STATUS_REGISTER = 40203;
     private const COMMAND_REGISTER = 40200;
 
@@ -15,13 +13,7 @@ class DRUKamin extends IPSModule
     {
         parent::Create();
 
-        $this->RegisterPropertyString('GatewayMode', 'existing');
-        $this->RegisterPropertyInteger('GatewayInstanceID', 0);
-        $this->RegisterPropertyString('InterfaceMode', 'new');
-        $this->RegisterPropertyInteger('InterfaceInstanceID', 0);
-        $this->RegisterPropertyString('Host', '');
-        $this->RegisterPropertyInteger('Port', 502);
-        $this->RegisterPropertyInteger('UnitID', self::DEVICE_UNIT_ID);
+        $this->RequireParent(self::MODBUS_GATEWAY_MODULE_ID);
 
         $this->RegisterPropertyBoolean('EnableFireplace', true);
         $this->RegisterPropertyBoolean('EnableSecondBurner', false);
@@ -30,8 +22,6 @@ class DRUKamin extends IPSModule
         $this->RegisterPropertyBoolean('EnableTemperatureControl', false);
         $this->RegisterPropertyBoolean('EnableWave', false);
 
-        $this->RegisterAttributeInteger('CreatedGatewayID', 0);
-        $this->RegisterAttributeInteger('CreatedInterfaceID', 0);
         $this->RegisterAttributeInteger('LastFlameWrite', 0);
         $this->RegisterAttributeInteger('LastIgnitionAt', 0);
 
@@ -41,7 +31,7 @@ class DRUKamin extends IPSModule
             'IPS_RequestAction($_IPS["TARGET"], "PollStatus", true);'
         );
 
-        $this->SetVisualizationType(1);
+        $this->SetVisualizationType(2);
     }
 
     private function IsTemperatureControlActive(): bool
@@ -60,6 +50,11 @@ class DRUKamin extends IPSModule
 
         if ($this->ReadParentConnectionID() !== 0) {
             $this->SetTimerInterval('PollStatus', 60000);
+            try {
+                $this->PollStatus();
+            } catch (Throwable $error) {
+                $this->SetCommunicationError($error->getMessage());
+            }
         } else {
             $this->SetTimerInterval('PollStatus', 0);
             $this->SetCommunicationError('Kein Modbus-Gateway verbunden.');
@@ -68,11 +63,6 @@ class DRUKamin extends IPSModule
 
     public function RequestAction($Ident, $Value)
     {
-        if ($Ident === 'SetupConnection') {
-            $this->SetupConnection();
-            return;
-        }
-
         if ($Ident === 'PollStatus') {
             try {
                 $this->PollStatus();
@@ -132,79 +122,10 @@ class DRUKamin extends IPSModule
 
     public function GetConfigurationForm()
     {
-        $isNewGateway = $this->ReadPropertyString('GatewayMode') === 'new';
-        $usesExistingInterface = $this->ReadPropertyString('InterfaceMode') === 'existing';
         $elements = [
             [
                 'type' => 'Label',
-                'caption' => 'Modbus-Verbindung'
-            ],
-            [
-                'type' => 'Select',
-                'name' => 'GatewayMode',
-                'caption' => 'Modbus-Gateway',
-                'options' => [
-                    ['caption' => 'Bestehendes Gateway verwenden', 'value' => 'existing'],
-                    ['caption' => 'Neues Gateway erstellen', 'value' => 'new']
-                ]
-            ],
-            [
-                'type' => 'SelectInstance',
-                'name' => 'GatewayInstanceID',
-                'caption' => 'Bestehendes Modbus-Gateway',
-                'moduleID' => self::MODBUS_GATEWAY_MODULE_ID,
-                'visible' => !$isNewGateway
-            ],
-            [
-                'type' => 'ValidationTextBox',
-                'name' => 'Host',
-                'caption' => 'DRU-Gateway-IP-Adresse / Hostname',
-                'visible' => $isNewGateway && !$usesExistingInterface
-            ],
-            [
-                'type' => 'NumberSpinner',
-                'name' => 'Port',
-                'caption' => 'TCP-Port',
-                'minimum' => 1,
-                'maximum' => 65535,
-                'visible' => $isNewGateway && !$usesExistingInterface
-            ],
-            [
-                'type' => 'NumberSpinner',
-                'name' => 'UnitID',
-                'caption' => 'Modbus Unit-ID des DRU-Gateways',
-                'minimum' => 2,
-                'maximum' => 255,
-                'visible' => true
-            ],
-            [
-                'type' => 'Select',
-                'name' => 'InterfaceMode',
-                'caption' => 'I/O-Schnittstelle',
-                'options' => [
-                    ['caption' => 'Neue Client-Socket-Schnittstelle erstellen', 'value' => 'new'],
-                    ['caption' => 'Bestehenden Client Socket verwenden', 'value' => 'existing']
-                ],
-                'visible' => $isNewGateway
-            ],
-            [
-                'type' => 'SelectInstance',
-                'name' => 'InterfaceInstanceID',
-                'caption' => 'Bestehender Client Socket',
-                'moduleID' => self::CLIENT_SOCKET_MODULE_ID,
-                'visible' => $isNewGateway && $usesExistingInterface
-            ],
-            [
-                'type' => 'Label',
-                'caption' => 'Bestehende Schnittstellen werden nicht umkonfiguriert. Bei einem neuen Gateway wird standardmaessig die Modbus Unit-ID 2 verwendet.'
-            ],
-            [
-                'type' => 'Label',
-                'caption' => 'Aktuelle Gateway-Verbindung: ' . $this->GetConnectionSummary()
-            ],
-            [
-                'type' => 'Label',
-                'caption' => 'Funktionen und Variablen'
+                'caption' => 'Funktionen'
             ],
             [
                 'type' => 'CheckBox',
@@ -245,13 +166,7 @@ class DRUKamin extends IPSModule
 
         return json_encode([
             'elements' => $elements,
-            'actions' => [
-                [
-                    'type' => 'Button',
-                    'caption' => 'Verbindung einrichten',
-                    'onClick' => 'IPS_RequestAction($_IPS["TARGET"], "SetupConnection", true);'
-                ]
-            ]
+            'actions' => []
         ], JSON_THROW_ON_ERROR);
     }
 
@@ -427,215 +342,9 @@ class DRUKamin extends IPSModule
         return 0;
     }
 
-    private function SetupConnection(): void
-    {
-        $gatewayMode = $this->ReadPropertyString('GatewayMode');
-        if ($gatewayMode !== 'new' && $gatewayMode !== 'existing') {
-            throw new Exception('Ungueltige Auswahl fuer das Modbus-Gateway.');
-        }
-
-        if ($gatewayMode === 'new') {
-            $gatewayId = $this->CreateOrReuseGateway();
-        } else {
-            $gatewayId = $this->ReadPropertyInteger('GatewayInstanceID');
-            $this->ValidateInstanceModule(
-                $gatewayId,
-                self::MODBUS_GATEWAY_MODULE_ID,
-                'Bitte waehlen Sie ein bestehendes Modbus-Gateway aus.'
-            );
-            if ((int) IPS_GetProperty($gatewayId, 'DeviceID') !== $this->ReadPropertyInteger('UnitID')) {
-                throw new Exception(
-                    'Die Device-ID des bestehenden Gateways muss mit der konfigurierten DRU Unit-ID uebereinstimmen.'
-                );
-            }
-        }
-
-        $gateway = IPS_GetInstance($gatewayId);
-        if ((int) $gateway['ConnectionID'] === 0 && $gatewayMode !== 'new') {
-            throw new Exception('Das ausgewaehlte Modbus-Gateway ist nicht mit einer I/O-Schnittstelle verbunden.');
-        }
-
-        if ($gatewayMode === 'new') {
-            $this->ConfigureGatewayInterface($gatewayId);
-        }
-
-        if ($this->ReadParentConnectionID() !== $gatewayId) {
-            IPS_ConnectInstance($this->InstanceID, $gatewayId);
-        }
-        if ($this->ReadParentConnectionID() !== $gatewayId) {
-            throw new Exception('Das Modul konnte nicht mit dem ausgewaehlten Modbus-Gateway verbunden werden.');
-        }
-
-        IPS_SetProperty($this->InstanceID, 'GatewayInstanceID', $gatewayId);
-        IPS_ApplyChanges($this->InstanceID);
-    }
-
-    private function CreateOrReuseGateway(): int
-    {
-        $this->ValidateNewGatewaySettings();
-        $gatewayId = $this->ReadAttributeInteger('CreatedGatewayID');
-        $isNew = $gatewayId === 0 || !IPS_ObjectExists($gatewayId);
-
-        if (!$isNew) {
-            $this->ValidateInstanceModule(
-                $gatewayId,
-                self::MODBUS_GATEWAY_MODULE_ID,
-                'Das zuvor angelegte Modbus-Gateway ist nicht mehr verfuegbar.'
-            );
-        }
-
-        if ($isNew) {
-            $gatewayId = IPS_CreateInstance(self::MODBUS_GATEWAY_MODULE_ID);
-            if ($gatewayId === 0) {
-                throw new Exception('Das Modbus-Gateway konnte nicht erstellt werden.');
-            }
-
-            IPS_SetName($gatewayId, 'DRU Modbus Gateway');
-            IPS_SetInfo($gatewayId, 'Automatisch durch das Modul DRU Kamin erstellt.');
-            $this->WriteAttributeInteger('CreatedGatewayID', $gatewayId);
-
-            $defaultInterfaceId = (int) IPS_GetInstance($gatewayId)['ConnectionID'];
-            if ($defaultInterfaceId !== 0) {
-                $this->WriteAttributeInteger('CreatedInterfaceID', $defaultInterfaceId);
-            }
-        }
-
-        $this->ConfigureGatewayProperties($gatewayId);
-        IPS_ApplyChanges($gatewayId);
-
-        return $gatewayId;
-    }
-
-    private function ConfigureGatewayProperties(int $gatewayId): void
-    {
-        $unitId = $this->ReadPropertyInteger('UnitID');
-        IPS_SetProperty($gatewayId, 'GatewayMode', 0);
-        IPS_SetProperty($gatewayId, 'DeviceID', $unitId);
-        IPS_SetProperty($gatewayId, 'SwapWords', 0);
-    }
-
-    private function ConfigureGatewayInterface(int $gatewayId): void
-    {
-        $interfaceMode = $this->ReadPropertyString('InterfaceMode');
-        if ($interfaceMode !== 'new' && $interfaceMode !== 'existing') {
-            throw new Exception('Ungueltige Auswahl fuer die I/O-Schnittstelle.');
-        }
-        $interfaceId = 0;
-
-        if ($interfaceMode === 'existing') {
-            $interfaceId = $this->ReadPropertyInteger('InterfaceInstanceID');
-            $this->ValidateInstanceModule(
-                $interfaceId,
-                self::CLIENT_SOCKET_MODULE_ID,
-                'Bitte waehlen Sie einen bestehenden Client Socket aus.'
-            );
-        } else {
-            $interfaceId = (int) IPS_GetInstance($gatewayId)['ConnectionID'];
-            if ($interfaceId === 0) {
-                $interfaceId = IPS_CreateInstance(self::CLIENT_SOCKET_MODULE_ID);
-                if ($interfaceId === 0) {
-                    throw new Exception('Die Client-Socket-Schnittstelle konnte nicht erstellt werden.');
-                }
-                IPS_SetName($interfaceId, 'DRU Client Socket');
-                $this->WriteAttributeInteger('CreatedInterfaceID', $interfaceId);
-            }
-
-            $this->ValidateInstanceModule(
-                $interfaceId,
-                self::CLIENT_SOCKET_MODULE_ID,
-                'Das Modbus-Gateway besitzt keine gueltige Client-Socket-Schnittstelle.'
-            );
-            $host = trim($this->ReadPropertyString('Host'));
-            IPS_SetProperty($interfaceId, 'Host', $host);
-            IPS_SetProperty($interfaceId, 'Port', $this->ReadPropertyInteger('Port'));
-            IPS_SetProperty($interfaceId, 'Open', true);
-            IPS_ApplyChanges($interfaceId);
-        }
-
-        $currentInterfaceId = (int) IPS_GetInstance($gatewayId)['ConnectionID'];
-        if ($currentInterfaceId !== $interfaceId) {
-            if ($currentInterfaceId !== 0) {
-                IPS_DisconnectInstance($gatewayId);
-            }
-            IPS_ConnectInstance($gatewayId, $interfaceId);
-            if ((int) IPS_GetInstance($gatewayId)['ConnectionID'] !== $interfaceId) {
-                throw new Exception('Das Modbus-Gateway konnte nicht mit der I/O-Schnittstelle verbunden werden.');
-            }
-
-            $ownedInterfaceId = $this->ReadAttributeInteger('CreatedInterfaceID');
-            if (
-                $currentInterfaceId !== 0
-                && $currentInterfaceId === $ownedInterfaceId
-                && $interfaceMode === 'existing'
-                && !$this->IsInterfaceInUse($currentInterfaceId, $gatewayId)
-            ) {
-                IPS_DeleteInstance($currentInterfaceId);
-                $this->WriteAttributeInteger('CreatedInterfaceID', 0);
-            }
-        }
-
-        IPS_SetProperty($this->InstanceID, 'InterfaceInstanceID', $interfaceId);
-        $this->WriteAttributeInteger('CreatedInterfaceID', $interfaceMode === 'new' ? $interfaceId : 0);
-    }
-
-    private function IsInterfaceInUse(int $interfaceId, int $excludingGatewayId): bool
-    {
-        foreach (IPS_GetInstanceListByModuleID(self::MODBUS_GATEWAY_MODULE_ID) as $gatewayId) {
-            if (
-                $gatewayId !== $excludingGatewayId
-                && (int) IPS_GetInstance($gatewayId)['ConnectionID'] === $interfaceId
-            ) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private function ValidateInstanceModule(int $instanceId, string $moduleId, string $message): void
-    {
-        if ($instanceId <= 0) {
-            throw new Exception($message);
-        }
-
-        $instance = IPS_GetInstance($instanceId);
-        if (strtoupper($instance['ModuleInfo']['ModuleID']) !== strtoupper($moduleId)) {
-            throw new Exception($message);
-        }
-    }
-
-    private function ValidateNewGatewaySettings(): void
-    {
-        $unitId = $this->ReadPropertyInteger('UnitID');
-        if ($unitId < 2 || $unitId > 255) {
-            throw new Exception('Die DRU-Modbus-Unit-ID muss zwischen 2 und 255 liegen.');
-        }
-
-        if ($this->ReadPropertyString('InterfaceMode') === 'new') {
-            if (trim($this->ReadPropertyString('Host')) === '') {
-                throw new Exception('Bitte tragen Sie die IP-Adresse oder den Hostnamen des DRU-Gateways ein.');
-            }
-            $port = $this->ReadPropertyInteger('Port');
-            if ($port < 1 || $port > 65535) {
-                throw new Exception('Der TCP-Port muss zwischen 1 und 65535 liegen.');
-            }
-        }
-    }
-
     private function ReadParentConnectionID(): int
     {
         return (int) IPS_GetInstance($this->InstanceID)['ConnectionID'];
-    }
-
-    private function GetConnectionSummary(): string
-    {
-        $connectionId = $this->ReadParentConnectionID();
-        if ($connectionId === 0) {
-            return 'nicht verbunden';
-        }
-
-        $connection = IPS_GetObject($connectionId);
-        return $connection['ObjectName'] . ' (ID ' . $connectionId . ')';
     }
 
     private function PollStatus(): void
@@ -876,11 +585,11 @@ class DRUKamin extends IPSModule
 
     private function ReadRegister(int $register): int
     {
-        $address = $register - 40001;
+        // DRU expects the documented register number as-is, not a 40001-relative offset.
         $response = $this->SendDataToParent(json_encode([
             'DataID' => self::MODBUS_GATEWAY_DATA_ID,
             'Function' => 3,
-            'Address' => $address,
+            'Address' => $register,
             'Quantity' => 1,
             'Data' => ''
         ], JSON_THROW_ON_ERROR));
@@ -913,7 +622,7 @@ class DRUKamin extends IPSModule
         $response = $this->SendDataToParent(json_encode([
             'DataID' => self::MODBUS_GATEWAY_DATA_ID,
             'Function' => 6,
-            'Address' => $register - 40001,
+            'Address' => $register,
             'Quantity' => 1,
             'Data' => bin2hex(pack('n', $value))
         ], JSON_THROW_ON_ERROR));
