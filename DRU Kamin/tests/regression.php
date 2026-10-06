@@ -42,7 +42,7 @@ function IPS_DeleteVariable(int $id): void {
     unset($GLOBALS['variableValues'][$id]);
 }
 function IPS_LogMessage(string $source, string $message): void { $GLOBALS['logs'][] = [$source, $message]; }
-function IPS_Sleep(int $milliseconds): void {}
+function IPS_Sleep(int $milliseconds): void { throw new RuntimeException('Blocking sleep must not be used by DRU actions'); }
 function IPS_VariableProfileExists(string $name): bool { return isset($GLOBALS['profiles'][$name]); }
 function IPS_CreateVariableProfile(string $name, int $type): void { $GLOBALS['profiles'][$name] = $type; }
 function IPS_SetVariableProfileValues(...$arguments): void {}
@@ -169,6 +169,49 @@ class IPSModule
 
 require dirname(__DIR__) . '/module.php';
 
+class TestDRUKamin extends DRUKamin
+{
+    public bool $autoDrain = true;
+    private bool $draining = false;
+
+    public function ApplyChanges()
+    {
+        parent::ApplyChanges();
+        if ($this->autoDrain) {
+            $this->DrainOperation();
+        }
+    }
+
+    public function RequestAction($Ident, $Value)
+    {
+        parent::RequestAction($Ident, $Value);
+        if ($this->autoDrain && !$this->draining) {
+            $this->DrainOperation();
+        }
+    }
+
+    public function DrainOperation(): void
+    {
+        $this->draining = true;
+        try {
+            for ($attempt = 0; $attempt < 500 && $this->attributes['OperationJob'] !== ''; $attempt++) {
+                $job = json_decode($this->attributes['OperationJob'], true, 512, JSON_THROW_ON_ERROR);
+                $index = $job['index'];
+                if (isset($job['steps'][$index]['deadline'])) {
+                    $job['steps'][$index]['deadline'] -= 2;
+                    $this->attributes['OperationJob'] = json_encode($job, JSON_THROW_ON_ERROR);
+                }
+                parent::RequestAction('OperationTick', true);
+            }
+            if ($this->attributes['OperationJob'] !== '') {
+                throw new RuntimeException('Operation did not terminate in test scheduler');
+            }
+        } finally {
+            $this->draining = false;
+        }
+    }
+}
+
 function check(bool $condition, string $description): void {
     if (!$condition) {
         throw new RuntimeException('FAIL: ' . $description);
@@ -183,7 +226,7 @@ function commands(DRUKamin $module): array {
     );
 }
 
-$module = new DRUKamin();
+$module = new TestDRUKamin();
 $module->Create();
 $module->ApplyChanges();
 check($module->parentCalls === [['connect', '{A5F663AB-C400-4FE5-B207-4D67CC030564}']], 'Native ConnectParent instead of forced parent creation');
@@ -249,7 +292,7 @@ check(commands($module) === [103, 104], 'Light and boost send independent comman
 
 $module->requests = [];
 $module->rawStatus = 0;
-$module->statusQueue = [0, 0, 0, 4, 4];
+$module->statusQueue = [0, 0, 0, 4];
 $module->RequestAction('Fireplace', true);
 check(commands($module) === [101], 'Ignition sends only command 101, no pilot command or second burner command');
 check(payload($module)['values']['Fireplace'], 'Main burner ON is published only after bit 2 is read');
@@ -431,7 +474,7 @@ try {
     restore_error_handler();
 }
 
-$syncModule = new DRUKamin();
+$syncModule = new TestDRUKamin();
 $syncModule->Create();
 $syncModule->properties['EnableWave'] = true;
 $syncModule->registerValues[40420] = 17;
@@ -490,8 +533,9 @@ $syncModule->RequestAction('PollStatus', true);
 check(payload($syncModule)['waveSettings']['available'], 'Wave sync recovers after valid register reads');
 $failed->setValue($syncModule, true);
 (new ReflectionMethod(DRUKamin::class, 'SynchronizeWaveSettings'))->invoke($syncModule);
-check($failed->getValue($syncModule) && $syncModule->attributes['WaveUpdatedAt'] > 0,
-    'Successful readback preserves a preceding write failure');
+$syncModule->DrainOperation();
+check($syncModule->attributes['WaveUpdatedAt'] > 0,
+    'Scheduled readback completes with actual device values');
 
 $syncModule->writeResponseQueue = [pack('Cnn', 6, 40420, 30), false];
 // The acknowledged first write changes the device; the second is rejected.
@@ -513,7 +557,7 @@ $syncModule->RequestAction('PollStatus', true);
 check(payload($syncModule)['waveSettings']['available'] && payload($syncModule)['waveSettings']['interval'] === 35,
     'Reconnect reloads device Wave settings');
 
-$resetModule = new DRUKamin();
+$resetModule = new TestDRUKamin();
 $resetModule->Create();
 $resetModule->ApplyChanges();
 foreach ([0, 64, 1, 129] as $status) {
@@ -577,7 +621,7 @@ $previewJson = substr($previewPresets, strpos($previewPresets, '=') + 1);
 check(json_decode(trim($previewJson, " \n\r;"), true, 512, JSON_THROW_ON_ERROR) === $presets,
     'Offline preview generated presets match canonical JSON');
 
-$timer = new DRUKamin();
+$timer = new TestDRUKamin();
 $timer->Create();
 $timer->rawStatus = 4;
 $timer->ApplyChanges();
@@ -633,6 +677,7 @@ $timerAction('reset', 60);
 check($timer->attributes['OffTimerState'] === 'idle' && commands($timer) === [], 'Timer cannot turn on an off fireplace');
 
 foreach ([4, 516, 16388, 16384] as $initialStatus) {
+    $timer->statusQueue = [];
     $timer->rawStatus = $initialStatus;
     $timerAction('reset', 60);
     $timer->attributes['OffTimerDeadline'] = time() - 1;
@@ -645,10 +690,11 @@ foreach ([4, 516, 16388, 16384] as $initialStatus) {
         && $timer->timers['OffTimer'] === 0, 'Expired timer confirms shutdown including automation: ' . $initialStatus);
 }
 $timer->rawStatus = 4;
+$timer->statusQueue = [];
 $timerAction('reset', 60);
 $timer->attributes['OffTimerDeadline'] = time() - 1;
 $savedAttributes = $timer->attributes;
-$restored = new DRUKamin();
+$restored = new TestDRUKamin();
 $restored->Create();
 $restored->attributes = $savedAttributes;
 $GLOBALS['kernelRunlevel'] = 10102;
@@ -694,7 +740,7 @@ $timer->statusQueue = [16384, 16384, 16384];
 $timer->rawStatus = 16384;
 $timer->requests = [];
 $timer->RequestAction('OffTimerTick', true);
-check(commands($timer) === [8, 3] && $timer->attributes['OffTimerState'] === 'stopping',
+check(commands($timer) === [8] && $timer->attributes['OffTimerState'] === 'stopping',
     'Main OFF cannot confirm shutdown while temperature automation remains active');
 $timer->attributes['OffTimerNextAttempt'] = time() - 1;
 $timer->statusQueue = [516, 8, 8];
@@ -751,5 +797,111 @@ $timer->RequestAction('OffTimerTick', true);
 check(count($timer->requests) === $requests && str_contains(end($GLOBALS['logs'])[1], 'andere Kaminaktion'),
     'Contended action lock reports failure instead of overlapping Modbus commands');
 $GLOBALS['semaphoreAvailable'] = true;
+
+$async = new TestDRUKamin();
+$async->autoDrain = false;
+$async->Create();
+$async->ApplyChanges();
+$async->requests = [];
+$async->RequestAction('Fireplace', true);
+check(payload($async)['actionPending'] && payload($async)['pendingAction'] === 'Ignition' && commands($async) === [],
+    'Ignition is scheduled without sleep or optimistic main-burner state');
+$async->RequestAction('OperationTick', true);
+check(commands($async) === [101] && $GLOBALS['semaphoreDepth'] === 0,
+    'Ignition command writes once and releases lock before waiting');
+$requests = count($async->requests);
+$async->RequestAction('PollStatus', true);
+check(count($async->requests) === $requests + 1 && payload($async)['statusAvailable'] && payload($async)['actionPending'],
+    'Five-second poll runs while ignition awaits main-burner confirmation');
+$async->RequestAction('Fireplace', true);
+check(commands($async) === [101], 'Pending server operation rejects duplicate ignition without another write');
+$async->rawStatus = 4;
+$async->RequestAction('OperationTick', true);
+check(!payload($async)['actionPending'] && payload($async)['values']['Fireplace'],
+    'Fresh main bit completes scheduled ignition and publishes actual status');
+$async->properties['EnableSecondBurner'] = true;
+$async->rawStatus = 0;
+$async->RequestAction('SecondBurner', true);
+$async->RequestAction('OperationTick', true);
+$async->RequestAction('OperationTick', true);
+$writes = commands($async);
+check(end($writes) === 101 && !in_array(102, $writes, true), 'Second burner waits for confirmed main burner before sending 102');
+$async->rawStatus = 4;
+$async->RequestAction('OperationTick', true);
+$async->RequestAction('OperationTick', true);
+$async->rawStatus = 12;
+$async->RequestAction('OperationTick', true);
+check(commands($async) === [101, 101, 102] && !payload($async)['actionPending'],
+    'Scheduled main/second burner sequence completes in correct order');
+$async->rawStatus = 0;
+$async->RequestAction('Fireplace', true);
+$async->RequestAction('OperationTick', true);
+$async->RequestAction('Fireplace', false);
+$async->rawStatus = 0;
+$async->RequestAction('OperationTick', true);
+$writes = commands($async);
+check(end($writes) === 3 && !payload($async)['actionPending'], 'Explicit OFF cancels pending ignition and stale ticks cannot re-ignite');
+
+$async->properties['EnableWave'] = true;
+$async->rawStatus = 516;
+$async->ApplyChanges();
+$async->DrainOperation();
+$async->requests = [];
+$async->RequestAction('SaveWaveSettings', json_encode(['interval' => 30, 'stages' => array_fill(0, 20, 63), 'requestId' => 'test-wave-request']));
+check(payload($async)['waveResult'] === 'pending' && count(array_filter($async->requests,
+    static fn (array $r): bool => $r['Function'] === 6)) === 1, 'Wave save transfers only one register per scheduled step');
+$requests = count($async->requests);
+$async->RequestAction('PollStatus', true);
+check(count($async->requests) === $requests + 1 && payload($async)['statusAvailable'],
+    'Polling interleaves with Wave transfer rather than waiting for 22 telegrams');
+$async->DrainOperation();
+check(payload($async)['waveResult'] === 'applied' && payload($async)['waveSettings']['stages'] === array_fill(0, 20, 64),
+    'Wave success requires complete quantized readback, not just accepted selection');
+check(payload($async)['waveRequestId'] === 'test-wave-request', 'Wave result retains request ID for suspended and multiple clients');
+$async->registerValues[40421] = 0x0101;
+$async->rawStatus = 516;
+$async->RequestAction('SaveWaveSettings', json_encode(['interval' => 30, 'stages' => array_fill(0, 20, 100)]));
+while (true) {
+    $job = json_decode($async->attributes['OperationJob'], true, 512, JSON_THROW_ON_ERROR);
+    if (($job['steps'][$job['index']]['type'] ?? '') === 'readWave') { break; }
+    $async->RequestAction('OperationTick', true);
+}
+$async->registerValues[40421] = 0x0101;
+$async->DrainOperation();
+check(payload($async)['waveResult'] === 'failed' && payload($async)['waveSettings']['stages'][0] === 0
+    && str_contains(payload($async)['actionError'], 'entspricht nicht'), 'Mismatched Wave readback reports failure and preserves real device pattern');
+
+$async->rawStatus = 516;
+$async->RequestAction('OffTimerAction', json_encode(['action' => 'start', 'duration' => 60]));
+$async->attributes['OffTimerDeadline'] = time() - 1;
+$async->RequestAction('OffTimerTick', true);
+check(payload($async)['offTimer']['state'] === 'stopping' && payload($async)['pendingAction'] === 'Shutdown',
+    'Timer expiry remains stopping until all automation and burner bits are confirmed');
+$async->RequestAction('OffTimerAction', json_encode(['action' => 'pause']));
+$requests = count($async->requests);
+$async->RequestAction('OperationTick', true);
+check(payload($async)['offTimer']['state'] === 'paused' && count($async->requests) === $requests,
+    'Pause cancels pending timer shutdown steps without undoing already sent commands');
+$async->rawStatus = 4;
+$async->RequestAction('Fireplace', false);
+$async->ApplyChanges();
+$async->DrainOperation();
+$requests = count($async->requests);
+$async->RequestAction('OperationTick', true);
+check($async->attributes['OperationJob'] === '' && count($async->requests) === $requests,
+    'ApplyChanges cancels pending command callbacks without replaying writes');
+$async->attributes['StatusUpdatedAt'] = time() - 15;
+(new ReflectionMethod(DRUKamin::class, 'UpdateVisualization'))->invoke($async);
+check(!payload($async)['statusAvailable'] && payload($async)['statusValidForMs'] === 0,
+    'Asynchronous work never extends the 15-second status safety boundary');
+$GLOBALS['semaphoreAvailable'] = false;
+$requests = count($async->requests);
+$logCount = count($logs);
+$async->RequestAction('PollStatus', true);
+check(count($async->requests) === $requests && count($logs) === $logCount,
+    'Contended poll skips immediately with debug diagnostics, not a false transport error');
+$GLOBALS['semaphoreAvailable'] = true;
+check(count(array_filter($async->debug, static fn (array $entry): bool => $entry[0] === 'Modbus Laufzeit')) > 0,
+    'Transport diagnostics record FC/register and elapsed time');
 
 echo 'All DRU regression checks passed.' . PHP_EOL;

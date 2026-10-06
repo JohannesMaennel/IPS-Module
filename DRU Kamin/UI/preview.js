@@ -20,6 +20,9 @@
     let wave = { available: true, interval: 10, stages: Array(20).fill(50) };
     let pendingTimer;
     let pendingAction = "";
+    let waveResult = "idle";
+    let waveRequestId = "";
+    let actionError = "";
     let offTimer = { state: "idle", duration: 3600, deadline: 0, remaining: 0, error: "" };
     let nextOffAttempt = 0;
 
@@ -82,6 +85,11 @@
             statusAvailable: available,
             statusValidForMs: available ? 15000 : 0,
             resetPending,
+            actionPending: pendingAction !== "",
+            pendingAction: pendingAction === "wave-save" ? "WaveSave" : pendingAction,
+            actionError,
+            waveResult,
+            waveRequestId,
             offTimer: { ...offTimer, serverTime: Math.floor(Date.now() / 1000) },
             canSetFlameHeight: available && (status & 4) !== 0 && (status & 513) === 0 && ((status >> 13) & 3) !== 2,
             waveSettings: wave
@@ -96,6 +104,8 @@
         pendingAction = action;
         pendingTimer = window.setTimeout(() => {
             pendingAction = "";
+            actionError = "";
+            waveResult = "idle";
             callback();
             push();
         }, delay);
@@ -184,12 +194,26 @@
                 break;
             case "SaveWaveSettings": {
                 const settings = JSON.parse(value);
-                wave = {
-                    available: true,
-                    interval: settings.interval,
-                    stages: settings.stages.map(percentage => Math.round(Math.round(percentage * 14 / 100) * 100 / 14))
-                };
-                note("Wave-Muster lokal gespeichert (keine Geräteübertragung).");
+                waveRequestId = settings.requestId || "";
+                if ((status & (1 | 4 | 512)) !== (4 | 512) || pendingAction) {
+                    waveResult = "failed";
+                    actionError = "Wave-Auftrag im aktuellen Gerätestatus nicht erlaubt.";
+                    break;
+                }
+                waveResult = "pending";
+                actionError = "";
+                delayed("wave-save", 500, () => {
+                    if (document.getElementById("waveFails").checked) {
+                        waveResult = "failed";
+                        actionError = "Wave-Schreiben abgelehnt; aktuelles Gerätemuster bleibt erhalten.";
+                        note(actionError);
+                    } else {
+                        wave = { available: true, interval: settings.interval,
+                            stages: settings.stages.map(percentage => Math.round(Math.round(percentage * 14 / 100) * 100 / 14)) };
+                        waveResult = "applied";
+                        note("Wave-Muster lokal angewendet und bestätigt (keine Geräteübertragung).");
+                    }
+                });
                 break;
             }
             case "ReloadWaveSettings":
@@ -215,6 +239,8 @@
                 nextOffAttempt = now + 30;
                 note(offTimer.error);
             } else {
+                window.clearTimeout(pendingTimer);
+                pendingAction = "";
                 status &= ~(4 | 8 | 512);
                 status = (status & ~(3 << 13)) | (1 << 13);
                 clearOffTimer();

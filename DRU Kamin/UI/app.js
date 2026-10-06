@@ -31,6 +31,11 @@
     let suppressStartClick = false;
     let waveDraft;
     let waveEditing = false;
+    let waveRequestPending = false;
+    let waveRequestAcknowledged = false;
+    let waveRequestTimeout;
+    let waveRequestId = "";
+    let actionPending = false;
     let offTimer = { state: "idle", duration: 3600, deadline: 0, remaining: 0, error: "" };
     let timerClockOffset = 0;
     let timerPending = false;
@@ -146,7 +151,7 @@
     }
 
     function canStart() {
-        return statusAvailable && !mainBurnerOn && !fault && !ignitionForbidden && !temperatureActive
+        return statusAvailable && !actionPending && !mainBurnerOn && !fault && !ignitionForbidden && !temperatureActive
             && values.Fireplace !== undefined;
     }
 
@@ -220,6 +225,7 @@
         }
         values = data.values || {};
         features = data.features || {};
+        actionPending = data.actionPending === true;
         if (data.offTimer) {
             offTimer = data.offTimer;
             timerClockOffset = Number(offTimer.serverTime) * 1000 - Date.now();
@@ -227,7 +233,20 @@
             window.clearTimeout(timerPendingTimeout);
         }
         const nextWaveSettings = data.waveSettings || waveSettings;
-        if (JSON.stringify(nextWaveSettings) !== JSON.stringify(waveSettings)) {
+        if (waveRequestPending && data.waveResult === "pending") {
+            waveRequestAcknowledged = true;
+        }
+        const waveReplyMatches = data.waveRequestId ? data.waveRequestId === waveRequestId : waveRequestAcknowledged;
+        if (waveRequestPending && ((data.waveResult === "failed" && (!data.waveRequestId || waveReplyMatches))
+            || (waveReplyMatches && data.waveResult === "applied"))) {
+            waveRequestPending = false;
+            window.clearTimeout(waveRequestTimeout);
+            if (data.waveResult === "failed") {
+                waveDraft = undefined;
+            } else if (waveDraft) {
+                waveDraft = { ...nextWaveSettings, stages: [...nextWaveSettings.stages], profile: waveDraft.profile };
+            }
+        } else if (!waveRequestPending && JSON.stringify(nextWaveSettings) !== JSON.stringify(waveSettings)) {
             waveDraft = undefined;
         }
         waveSettings = nextWaveSettings;
@@ -268,10 +287,10 @@
         } else if (ignitionStartedAt) {
             statusLabel.textContent = "Zündung läuft – warte auf Hauptbrenner";
         } else {
-            statusLabel.textContent = "Verbunden";
+            statusLabel.textContent = actionPending ? "Geräteauftrag läuft – warte auf Bestätigung" : "Verbunden";
         }
-        if (offTimer.error) {
-            statusLabel.textContent = offTimer.error;
+        if (offTimer.error || data.actionError) {
+            statusLabel.textContent = offTimer.error || data.actionError;
             statusLabel.classList.add("error");
         }
         updateTimerDisplay();
@@ -288,7 +307,7 @@
                 render();
             }, Math.max(0, Number(data.statusValidForMs ?? 15000)));
         }
-        const nextState = JSON.stringify([values, features, waveSettings, status, statusAvailable, resetPending, data.canSetFlameHeight]);
+        const nextState = JSON.stringify([values, features, waveSettings, status, statusAvailable, resetPending, data.canSetFlameHeight, actionPending, waveRequestPending, data.waveResult]);
         if (nextState !== renderedState) {
             renderedState = nextState;
             render();
@@ -318,7 +337,7 @@
         const active = timerDialog.querySelector("#timerActive");
         active.checked = offTimer.state === "running" || offTimer.state === "stopping";
         const canRun = statusAvailable && !fault && (mainBurnerOn || waveActive || temperatureActive)
-            && values.Fireplace !== undefined;
+            && values.Fireplace !== undefined && data.pendingAction !== "Shutdown";
         const valid = timerDuration() !== null;
         active.disabled = timerPending || (!active.checked && (!canRun || !valid));
         timerDialog.querySelector('[data-timer-action="reset"]').disabled = timerPending || !canRun || !valid;
@@ -380,8 +399,8 @@
             <div class="timer-heading"><h2 id="timerTitle">Austimer</h2>
                 <button type="button" class="control" data-timer-close aria-label="Austimer schließen">×</button></div>
             <div class="timer-duration">
-                <label>Stunden<input id="timerHours" type="number" min="0" max="24" step="1" required></label>
-                <label>Minuten<input id="timerMinutes" type="number" min="0" max="59" step="1" required></label>
+                <label>Stunden<select id="timerHours" aria-label="Stunden"></select></label>
+                <label>Minuten<select id="timerMinutes" aria-label="Minuten"></select></label>
             </div>
             <label class="timer-switch">Aktiv<input id="timerActive" type="checkbox" role="switch"></label>
             <p class="timer-feedback" role="status"></p>
@@ -391,6 +410,12 @@
                 <button type="button" class="control" data-timer-action="reset">Reset</button>
             </div>
         </section>`;
+        [["timerHours", 24], ["timerMinutes", 59]].forEach(([id, maximum]) => {
+            const select = timerDialog.querySelector(`#${id}`);
+            for (let value = 0; value <= maximum; value++) {
+                select.add(new Option(String(value).padStart(2, "0"), String(value)));
+            }
+        });
         const duration = Number(offTimer.duration) || 3600;
         timerDialog.querySelector("#timerHours").value = Math.floor(duration / 3600);
         timerDialog.querySelector("#timerMinutes").value = Math.floor(duration / 60) % 60;
@@ -401,14 +426,23 @@
         timerDialog.querySelectorAll("[data-timer-action]").forEach(button => {
             button.addEventListener("click", () => timerAction(button.dataset.timerAction));
         });
-        timerDialog.querySelectorAll('input[type="number"]').forEach(input => {
-            input.addEventListener("input", updateTimerDisplay);
+        timerDialog.querySelectorAll(".timer-duration select").forEach(select => {
+            select.addEventListener("change", () => {
+                const minutes = timerDialog.querySelector("#timerMinutes");
+                const fullDay = timerDialog.querySelector("#timerHours").value === "24";
+                if (fullDay) {
+                    minutes.value = "0";
+                }
+                [...minutes.options].forEach(option => { option.disabled = fullDay && option.value !== "0"; });
+                updateTimerDisplay();
+            });
+            select.addEventListener("input", updateTimerDisplay);
         });
         timerDialog.addEventListener("keydown", event => {
             if (event.key === "Escape") {
                 closeTimerDialog();
             } else if (event.key === "Tab") {
-                const elements = [...timerDialog.querySelectorAll("button:not(:disabled), input:not(:disabled)")];
+                const elements = [...timerDialog.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")];
                 const index = elements.indexOf(document.activeElement);
                 if ((event.shiftKey && index <= 0) || (!event.shiftKey && index === elements.length - 1)) {
                     event.preventDefault();
@@ -417,15 +451,19 @@
             }
         });
         document.querySelector(".dru").append(timerDialog);
+        timerDialog.querySelector("#timerHours").dispatchEvent(new Event("change"));
         [statusBar, controls, footer].forEach(element => { element.inert = true; });
         updateTimerDisplay();
         timerDialog.querySelector("#timerHours").focus();
     }
 
     function render() {
+        if (holdStartedAt && canStart()) {
+            return;
+        }
         cancelHold();
         window.cancelAnimationFrame(ignitionFrame);
-        renderedState = JSON.stringify([values, features, waveSettings, status, statusAvailable, resetPending, data.canSetFlameHeight]);
+        renderedState = JSON.stringify([values, features, waveSettings, status, statusAvailable, resetPending, data.canSetFlameHeight, actionPending, waveRequestPending, data.waveResult]);
         controls.replaceChildren();
         statusBar.replaceChildren(temperature);
         temperature.replaceChildren();
@@ -464,7 +502,7 @@
             reset.type = "button";
             reset.textContent = resetPending ? "Reset läuft …" : "Kamin zurücksetzen";
             addButtonIcon(reset, "reset");
-            reset.disabled = !statusAvailable || resetPending || (status & (1 << 6)) === 0;
+            reset.disabled = !statusAvailable || actionPending || resetPending || (status & (1 << 6)) === 0;
             reset.title = resetPending
                 ? "Auf die Rückmeldung des Kamins warten."
                 : (status & (1 << 6)) === 0
@@ -523,7 +561,7 @@
             } else if (!isOn) {
                 allowed = allowed && !fault;
             }
-            button.disabled = !allowed;
+            button.disabled = !allowed || actionPending;
             button.addEventListener("click", () => sendAction(ident, !isOn));
             if (ident === "SecondBurner") {
                 let toolbar = controls.querySelector(".fire-toolbar");
@@ -551,7 +589,7 @@
         const modeSelect = document.createElement("select");
         modeSelect.className = "mode-select";
         modeSelect.setAttribute("aria-label", "Betriebsart");
-        modeSelect.disabled = !statusAvailable || (!mainBurnerOn && !temperatureActive && !waveActive);
+        modeSelect.disabled = !statusAvailable || actionPending || (!mainBurnerOn && !temperatureActive && !waveActive);
         const modeIcon = symbolSvg(operationMode);
         modeIcon.classList.add("mode-icon");
         const modeLabel = document.createElement("span");
@@ -682,6 +720,9 @@
             if (event.button !== 0 || !event.isPrimary) {
                 return;
             }
+            if (startUnlocked) {
+                suppressStartClick = false;
+            }
             beginHold();
         });
         button.addEventListener("pointerup", cancelHold);
@@ -694,6 +735,9 @@
             }
             event.preventDefault();
             if (!event.repeat) {
+                if (startUnlocked) {
+                    suppressStartClick = false;
+                }
                 beginHold();
             }
         });
@@ -738,7 +782,7 @@
             range.max = "100";
             range.step = "1";
             range.value = String(values.FlameHeight);
-            range.disabled = !statusAvailable || !data.canSetFlameHeight;
+            range.disabled = !statusAvailable || actionPending || !data.canSetFlameHeight;
             if (range.disabled) {
                 range.title = "Flammenhöhe ist erst nach freigegebener Zündung und im manuellen Modus verfügbar.";
             }
@@ -772,7 +816,7 @@
             range.max = "35";
             range.step = "0.5";
             range.value = String(values.TemperatureSetpoint);
-            range.disabled = !statusAvailable || fault;
+            range.disabled = !statusAvailable || actionPending || fault;
 
             const output = document.createElement("output");
             output.value = `${Number(range.value).toFixed(1)} °C`;
@@ -799,7 +843,7 @@
         const editor = document.createElement("section");
         editor.className = "wave-editor";
 
-        if (waveSettings.available !== true) {
+        if (waveSettings.available !== true && !waveRequestPending) {
             const notice = document.createElement("p");
             notice.textContent = "Wave-Einstellungen konnten noch nicht gültig aus dem Kamin gelesen werden.";
             editor.appendChild(notice);
@@ -807,7 +851,7 @@
             return;
         }
 
-        const enabled = statusAvailable && mainBurnerOn && waveActive && !fault;
+        const enabled = statusAvailable && mainBurnerOn && waveActive && !fault && !actionPending && !waveRequestPending;
         const draft = waveDraft || { interval: waveSettings.interval, stages: [...waveSettings.stages] };
         waveDraft = draft;
 
@@ -836,6 +880,8 @@
             render();
             if (profileSelect.value === "current") {
                 sendAction("ReloadWaveSettings", true);
+            } else {
+                submitWave(waveDraft);
             }
         };
         profileSelect.addEventListener("change", loadProfile);
@@ -862,14 +908,8 @@
         save.disabled = !enabled || !waveEditing;
         save.addEventListener("click", () => {
             save.disabled = true;
-            const settings = JSON.stringify({
-                interval: draft.interval,
-                stages: [...draft.stages]
-            });
             waveEditing = false;
-            waveDraft = undefined;
-            render();
-            sendAction("SaveWaveSettings", settings);
+            submitWave(draft);
         });
         profiles.append(profileLabel, edit, save);
         editor.appendChild(profiles);
@@ -902,6 +942,8 @@
         intervalOutput.value = `${draft.interval} s`;
         interval.addEventListener("input", () => {
             draft.interval = Number(interval.value);
+            draft.profile = "current";
+            profileSelect.value = "current";
             intervalOutput.value = `${draft.interval} s`;
             updateSummary();
         });
@@ -925,6 +967,8 @@
             range.setAttribute("aria-label", `Wave-Stufe ${index + 1}`);
             range.addEventListener("input", () => {
                 draft.stages[index] = Number(range.value);
+                draft.profile = "current";
+                profileSelect.value = "current";
                 output.value = `${range.value}%`;
                 updateSummary();
             });
@@ -936,6 +980,26 @@
         details.appendChild(stages);
         editor.appendChild(details);
         controls.appendChild(editor);
+    }
+
+    function submitWave(draft) {
+        if (waveRequestPending) {
+            return;
+        }
+        waveRequestPending = true;
+        waveRequestAcknowledged = false;
+        waveRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        waveDraft = draft;
+        window.clearTimeout(waveRequestTimeout);
+        waveRequestTimeout = window.setTimeout(() => {
+            waveRequestPending = false;
+            waveDraft = undefined;
+            render();
+            statusLabel.textContent = "Keine Wave-Bestätigung – Gerätestand prüfen.";
+            statusLabel.classList.add("error");
+        }, 30000);
+        render();
+        sendAction("SaveWaveSettings", JSON.stringify({ interval: draft.interval, stages: [...draft.stages], requestId: waveRequestId }));
     }
 
     applyData(data);

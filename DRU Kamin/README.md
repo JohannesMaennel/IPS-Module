@@ -18,6 +18,29 @@ Verbindungsverlust. Status 102 bedeutet erfolgreiche Modbus-Kommunikation,
 104 eine nicht aktive Parent-Kette und 201 einen fehlgeschlagenen Statusabruf.
 Eine erfolgreiche spaetere Abfrage stellt den aktiven Zustand wieder her.
 
+Geraetebestaetigungen laufen als geplante Einzelschritte mit eigenem
+IPS-Timer, nicht als Schlafschleifen unter der Pollingsperre. Wave-Schreiben
+und -Readback geben die Sperre nach jedem Register wieder frei. Frische
+Statusantworten waehrend eines Auftrags werden sofort veroeffentlicht.
+Ein wegen eines laufenden Telegramms uebersprungener Poll wird im Debug
+protokolliert, aber nicht als Verbindungsabbruch ausgegeben. Tatsaechliche
+Statuslesefehler bleiben Fehler; die 15-Sekunden-Grenze wird nicht verlaengert.
+Der Debug **Modbus Laufzeit** zeigt FC, Register und Dauer pro Telegramm;
+**Polling** zeigt Zyklusdauer, Statusalter und Sperrkonflikte. Damit lassen sich
+langsame Gateway-/I/O-Antworten von eigenen Warteablaeufen unterscheiden.
+
+Waehrend einer ausstehenden Bestaetigung werden konkurrierende Schreibauftraege
+abgewiesen. **AUS** kann einen laufenden Auftrag abbrechen und eine Abschaltung
+starten; bereits gesendete Befehle bleiben wirksam. Aenderungen uebernehmen
+bricht offene Geraeteauftraege ab, ohne sie automatisch erneut zu senden.
+Der persistente Austimer behaelt seinen Ablaufzeitpunkt und Abschaltretry.
+`IPS_RequestAction` kehrt bei geplanten Geraeteauftraegen vor der endgueltigen
+Statusbestaetigung zurueck; ein erfolgreicher Aufruf allein bedeutet nicht,
+dass der Brenner bereits an/aus ist. Statusvariablen folgen weiterhin den
+tatsaechlich gelesenen Bits. Die UI erhaelt Pending-, Fehler- und bei Wave
+auftragsbezogene Ergebnisdaten, auch wenn sie zwischenzeitlich im Hintergrund
+war.
+
 Die HTML-SDK-Nachrichten werden als JSON-String gesendet und in `handleMessage()`
 decodiert. Die Anzeige der Schalter folgt den Bits aus 40203, nicht einem
 optimistisch gesetzten Variablenwert. Ohne gueltige Rueckmeldung erscheint
@@ -28,7 +51,9 @@ der Status nach maximal 15 Sekunden.
 
 - Der HTML-Startbutton ist eine graue SVG-Flamme mit Schloss und Haltering.
   Zum Entriegeln drei Sekunden halten (Touch/Maus oder Leertaste/Enter),
-  loslassen und danach separat antippen. Ein kurzer Druck startet nichts.
+  loslassen und danach einmal separat antippen. Der erste neue Tap startet
+  auch dann, wenn iOS beim Loslassen keinen synthetischen Klick liefert.
+  Loslassen alleine und ein kurzer Druck starten nichts.
   Fokus-/Sichtbarkeitsverlust, Fehler oder ungueltiger Status sperren erneut.
   Die Freigabe betrifft die UI; bestehende IPS-Variablenaktionen bleiben
   unveraendert.
@@ -37,6 +62,8 @@ der Status nach maximal 15 Sekunden.
   Erst Bit 2 zeigt die kleine farbige **AUS**-Flamme oben links und die
   zentrale Regelung. Ohne Bestaetigung endet die UI-Wartephase nach
   30 Sekunden wieder verriegelt; das ist keine automatische Abschaltung.
+  Solange der Server einen Startauftrag bestaetigt, bleibt ein erneuter
+  Start gesperrt. Die UI zeigt niemals einen laufenden Auftrag als Erfolg.
   Licht und Boost bleiben unabhaengig bedienbar. Im autonomen Temperaturmodus
   bleiben Modus/Solltemperatur auch bei ausgeschaltetem Brenner erreichbar.
 - Hauptbrenner starten: Kommando 101 an Register 40200; erst Statusbit 2
@@ -111,7 +138,10 @@ ob Paketformat, Werte oder ein Geraetezustand die Ablehnung verursachen.
 ## Austimer
 
 Die Stoppuhr rechts in der festen Fusszeile oeffnet einen Dialog innerhalb
-der Kachel. Stunden und Minuten erlauben 1 Minute bis 24 Stunden (24:00).
+der Kachel. Native Stunden-/Minuten-Auswahlfelder sind ohne Zahlentastatur
+per Touch bedienbar und erlauben 1 Minute bis 24 Stunden (24:00).
+Bei 24 Stunden sind nur 0 Minuten auswaehlbar. Der Dialog ist auf Breite
+und Hoehe der Kachel begrenzt und scrollt bei Bedarf intern.
 Die erste Vorgabe ist eine Stunde, danach bleibt die letzte Dauer erhalten.
 Der Countdown steht mittig in der Fusszeile.
 
@@ -184,25 +214,35 @@ Das Layout ist fuer kleine IPS-Kacheln verdichtet: moderne Systemschrift
 (unter Windows Segoe UI), kurze Abstaende und kleinere Symbole.
 Schriften werden nicht extern geladen. Schaltflaechen behalten mindestens
 44 Pixel Hoehe; der Drei-Sekunden-Halteablauf bleibt unveraendert.
+Die Kachel verwendet ein festes helles Farbschema mit expliziten Farben,
+auch bei dunklem iOS-Systemdesign. Flammenring, Fusszeile, Modusicons,
+Dropdowns und Timerdialog wechseln nicht mehr einzeln zu System-Dunkelfarben.
 Beide horizontalen Regler zeigen Beschriftung und Wert mittig.
 Die Wave-Ansicht zeigt Profilwahl und Stift ohne zusaetzliche sichtbare Labels.
 Der Stift klappt Intervall und 20 vertikale Regler mit Abstand zur Profilinfo
 unterhalb auf. Die Diskette steht neben dem Stift und ist nur bei geoeffnetem
 Bearbeitungsmodus und gueltigem Geraetestatus bedienbar.
-Profilwechsel laden JSON-Vorlagen bzw. den aktuellen
-Geraetestand; unveraenderte Heartbeats erhalten den Entwurf. Nur die Diskette
-sendet einen Schreibauftrag und klappt die Details wieder zu. Das Zuklappen
+Vorlagenwahl sendet sofort einen Schreibauftrag; Aktuelles Profil laedt nur
+den Geraetestand. Unveraenderte Heartbeats erhalten den Entwurf.
+Die Diskette uebertraegt manuell bearbeitete Muster und klappt die Details
+wieder zu. Waehrend der Uebertragung ist die Profilwahl gesperrt. Das Zuklappen
 bestaetigt keinen Schreiberfolg; Fehler werden weiterhin in der Fusszeile
 gemeldet, und der Backend-Readback zeigt den tatsaechlichen Geraetestand.
-Es wird kein Popup verwendet:
+Fuer Wave wird kein Popup verwendet; der Austimer nutzt einen kachelinternen
+HTML-Dialog, keine native IPS-Popupfunktion:
 Das HTML-SDK dokumentiert keine native Popup-Oeffnungsfunktion, und das
 Popup-Modul ist laut Symcon-Dokumentation nicht in der Kachelvisualisierung
 verfuegbar. Es werden keine Popup-Variablen oder Navigationsskripte angelegt.
 
 `UI/wave-presets.json` enthaelt drei Profile mit je zwei Wellen ueber 20 Stufen:
 50-100 Prozent / 10 Sekunden, 20-60 Prozent / 20 Sekunden und
-10-100 Prozent / 10 Sekunden. Die Auswahl aendert nur den Editor.
-Erst **Wave-Muster speichern** schreibt auf das Geraet. Initial wird immer
+10-100 Prozent / 10 Sekunden. Die Auswahl uebertraegt die Vorlage sofort
+an den bestaetigten Wavebetrieb, ohne weiteren Speicherklick. Erst nach
+vollstaendiger Schreibbestaetigung und passendem quantisierten Readback gilt
+sie als angewendet. Bei Fehler zeigt die UI die Ablehnung und das reale
+Geraeteprofil bzw. einen fehlenden gueltigen Readback, nicht das Wunschmuster.
+Die bekannte Ablehnung von Register 40421 wird dadurch nicht behoben.
+Initial wird immer
 das gelesene Geraeteprofil gezeigt. Die Auswahl **Aktuelles Profil (Kamin)**
 verwirft den Entwurf und fordert einen neuen Readback an; ein Fehler ergibt kein Ersatzprofil.
 Ein abweichender Geraetestand ersetzt den Entwurf; unveraenderte Heartbeats nicht.
@@ -225,7 +265,10 @@ Reset, gesperrte Zuendung und Verbindungsverlust auswaehlen. Im Aus-Zustand
 drei Sekunden halten, loslassen, separat klicken: Nach zehn Sekunden wird
 der Brennerstatus simuliert. Die Checkboxen erlauben fehlgeschlagene Zuendung
 und einen weiterhin bestehenden Fehler nach Reset sowie eine fehlgeschlagene
-Austimer-Abschaltung mit Wiederholungsversuchen. Das Aktionsprotokoll
+Austimer-Abschaltung mit Wiederholungsversuchen sowie abgelehnte
+Wave-Uebertragung. Vorlagen werden auch in der Vorschau direkt angewendet,
+mit Pendingstatus, quantisiertem Ruecklesen und simulierbarer Ablehnung.
+Das Aktionsprotokoll
 zeigt alle simulierten Aufrufe. Browser neu laden setzt die Vorschau zurueck.
 Die Simulation prueft Darstellung und Bedienung, nicht Modbus oder Hardware.
 
@@ -240,6 +283,9 @@ String-basierten `UpdateVisualizationValue()`-Signatur. Er prueft Lifecycle,
 Timer, externe Statusaenderungen, Verbindungsverlust und Wiederherstellung,
 Optionen und Brennerbefehle sowie binaere FC6-Daten, deren
 Schreibbestaetigungen und den Abbruch teilweise geschriebener Wave-Folgen.
+Ein deterministischer Testscheduler prueft geplante Bestaetigungsschritte,
+Polling waehrend laufender Auftraege, Abbruch durch AUS, Readback-Abweichung,
+ausstehende Timerabschaltung und Wiederanlauf ohne automatische Zuendung.
 PHP benoetigt die in Symcon vorhandene Erweiterung
 `mbstring`; bei einer portablen CLI diese ebenfalls aktivieren.
 Er ersetzt keinen Hardwaretest.

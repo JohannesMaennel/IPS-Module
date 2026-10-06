@@ -18,6 +18,9 @@ window.runDRUUiRegression = async function () {
             statusRegister,
             statusValidForMs: 15000,
             canSetFlameHeight: (statusRegister & 4) !== 0,
+            actionPending: false,
+            actionError: "",
+            waveResult: "idle",
             waveSettings: { available: true, interval: 10, stages: Array(20).fill(50) },
             offTimer: { state: "idle", duration: 3600, remaining: 0, deadline: 0, serverTime: Math.floor(Date.now() / 1000), error: "" },
             ...overrides
@@ -88,6 +91,15 @@ window.runDRUUiRegression = async function () {
             && controls.querySelector(".wave-save").disabled, "Collapsed Wave profile keeps save disabled without duplicate labels or load button");
         if (window.druWavePresets) {
             const beforePreset = actions.length;
+            let currentWave = { available: true, interval: 25, stages: Array.from({ length: 20 }, (_, index) => index * 5) };
+            const confirmWave = settings => {
+                push(516, { Fireplace: true, Wave: true }, {
+                    actionPending: true, pendingAction: "WaveSave", waveResult: "pending", waveSettings: currentWave
+                });
+                currentWave = { available: true, interval: settings.interval,
+                    stages: settings.stages.map(stage => Math.round(Math.round(stage * 14 / 100) * 100 / 14)) };
+                push(516, { Fireplace: true, Wave: true }, { waveResult: "applied", waveSettings: currentWave });
+            };
             const choosePreset = id => {
                 const select = controls.querySelector(".wave-profile-select");
                 select.value = id;
@@ -96,18 +108,23 @@ window.runDRUUiRegression = async function () {
             choosePreset("even");
             check(controls.querySelector(".wave-summary").textContent.includes("10 s")
                 && controls.querySelector(".wave-summary").textContent.includes("50–100"), "Even preset summarizes range and interval");
+            check(actions.at(-1)[0] === "SaveWaveSettings" && controls.querySelector(".wave-profile-select").disabled,
+                "Selecting a preset transfers immediately and blocks duplicate selection pending confirmation");
+            confirmWave(JSON.parse(actions.at(-1)[1]));
             choosePreset("gentle");
             check(controls.querySelector(".wave-summary").textContent.includes("20 s")
                 && controls.querySelector(".wave-summary").textContent.includes("20–60"), "Gentle preset summarizes range and interval");
+            confirmWave(JSON.parse(actions.at(-1)[1]));
             choosePreset("strong");
             check(controls.querySelector(".wave-summary").textContent.includes("10–100"), "Strong preset spans 10-100 percent");
+            confirmWave(JSON.parse(actions.at(-1)[1]));
             const draftSelect = controls.querySelector(".wave-profile-select");
             push(516, { Fireplace: true, Wave: true }, {
-                waveSettings: { available: true, interval: 25, stages: Array.from({ length: 20 }, (_, index) => index * 5) }
+                waveResult: "applied", waveSettings: currentWave
             });
             check(controls.querySelector(".wave-profile-select") === draftSelect && draftSelect.value === "strong",
                 "Identical readback preserves draft profile");
-            check(actions.length === beforePreset, "Preset selection never writes to device");
+            check(actions.length === beforePreset + 3, "Each preset selection sends exactly one transfer without save click");
             controls.querySelector(".wave-edit").click();
             check(controls.querySelectorAll(".wave-slider").length === 20
                 && controls.querySelector(".interval-control input").value === "10"
@@ -117,7 +134,7 @@ window.runDRUUiRegression = async function () {
             edited.value = "25";
             edited.dispatchEvent(new Event("input"));
             push(516, { Fireplace: true, Wave: true }, {
-                waveSettings: { available: true, interval: 25, stages: Array.from({ length: 20 }, (_, index) => index * 5) }
+                waveResult: "applied", waveSettings: currentWave
             });
             check(controls.querySelector(".wave-slider") === edited && edited.value === "25",
                 "Heartbeat preserves expanded editor and unsaved slider value");
@@ -132,15 +149,39 @@ window.runDRUUiRegression = async function () {
                 "Explicit save sends selected preset with twenty stages");
             check(!controls.querySelector(".wave-slider") && controls.querySelector(".wave-save").disabled,
                 "Saving collapses Wave details immediately and disables diskette");
+            confirmWave(saved);
             choosePreset("current");
             check(actions.at(-1)[0] === "ReloadWaveSettings"
-                && controls.querySelector(".wave-summary").textContent.includes("25 s")
-                && controls.querySelector(".wave-summary").textContent.includes("0–95"), "Load current restores device profile and requests fresh readback");
+                && controls.querySelector(".wave-summary").textContent.includes("10 s"),
+                "Load current only requests readback of the newly applied device profile");
             controls.querySelector(".wave-edit").click();
-            check(controls.querySelector(".interval-control input").value === "25"
-                && controls.querySelectorAll(".wave-slider")[19].value === "95",
+            check(controls.querySelector(".interval-control input").value === "10"
+                && controls.querySelectorAll(".wave-slider")[0].value === String(currentWave.stages[0]),
                 "Editing current profile loads synchronized device data");
             controls.querySelector(".wave-edit").click();
+            choosePreset("even");
+            push(516, { Fireplace: true, Wave: true }, {
+                waveSettings: currentWave, waveResult: "failed", actionError: "Wave-Schreiben abgelehnt"
+            });
+            check(controls.querySelector(".wave-profile-select").value === "current"
+                && !controls.querySelector(".wave-profile-select").disabled
+                && controls.querySelector("#connectionStatus").textContent === "Wave-Schreiben abgelehnt",
+                "Rejected preset restores actual profile and visibly reports failure");
+            choosePreset("even");
+            const resumeSettings = JSON.parse(actions.at(-1)[1]);
+            push(516, { Fireplace: true, Wave: true }, {
+                waveSettings: currentWave, waveResult: "applied", waveRequestId: "another-client"
+            });
+            check(controls.querySelector(".wave-profile-select").disabled,
+                "Another client's Wave result cannot confirm this tile's transfer");
+            currentWave = { available: true, interval: resumeSettings.interval,
+                stages: resumeSettings.stages.map(stage => Math.round(Math.round(stage * 14 / 100) * 100 / 14)) };
+            push(516, { Fireplace: true, Wave: true }, {
+                waveSettings: currentWave, waveResult: "applied", waveRequestId: resumeSettings.requestId
+            });
+            check(!controls.querySelector(".wave-profile-select").disabled
+                && controls.querySelector(".wave-profile-select").value === "even",
+                "Correlated final result confirms preset even when suspended tile missed pending heartbeat");
         }
         push(516, { Fireplace: true, Wave: true }, {
             waveSettings: { available: false, interval: 25, stages: Array(20).fill(50) }
@@ -199,6 +240,25 @@ window.runDRUUiRegression = async function () {
         cancelledButton.dispatchEvent(new PointerEvent("pointerdown", { button: 0, isPrimary: true }));
         cancelledButton.dispatchEvent(new PointerEvent("pointercancel", { isPrimary: true }));
         check(controls.querySelector(".fire-button").dataset.state === "locked", "Canceled touch returns to locked start");
+        push(0, { Fireplace: false, RoomTemperature: 20 });
+        const noReleaseClickButton = controls.querySelector(".fire-button");
+        noReleaseClickButton.dispatchEvent(new PointerEvent("pointerdown", { button: 0, isPrimary: true }));
+        await new Promise(resolve => window.setTimeout(resolve, 100));
+        push(0, { Fireplace: false, RoomTemperature: 21 });
+        check(controls.querySelector(".fire-button") === noReleaseClickButton,
+            "Temperature heartbeat during hold preserves the original touch target");
+        await new Promise(resolve => window.setTimeout(resolve, 3000));
+        noReleaseClickButton.dispatchEvent(new PointerEvent("pointerup", { button: 0, isPrimary: true }));
+        const beforeSeparateTap = actions.length;
+        check(noReleaseClickButton.dataset.state === "ready" && actions.length === beforeSeparateTap,
+            "Long hold without synthetic release click unlocks but never ignites");
+        noReleaseClickButton.dispatchEvent(new PointerEvent("pointerdown", { button: 0, isPrimary: true }));
+        noReleaseClickButton.dispatchEvent(new PointerEvent("pointerup", { button: 0, isPrimary: true }));
+        noReleaseClickButton.click();
+        check(actions.length === beforeSeparateTap + 1 && actions.at(-1)[0] === "Fireplace" && actions.at(-1)[1] === true,
+            "First new tap after hold ignites even when iOS omitted the release click");
+        push(0, { Fireplace: false }, { actionPending: true, pendingAction: "Ignition" });
+        check(controls.querySelector(".fire-button").disabled, "Server-side ignition pending blocks duplicate start while polling remains fresh");
         push(16384, { Fireplace: false, TemperatureSetpoint: 20 });
         check(controls.querySelector(".mode-section") && controls.querySelector(".range-control")
             && controls.querySelector(".fire-button").disabled, "Autonomous temperature controls remain accessible with burner off");
@@ -223,6 +283,8 @@ window.runDRUUiRegression = async function () {
         const active = timerDialog.querySelector("#timerActive");
         const resetTimer = timerDialog.querySelector('[data-timer-action="reset"]');
         check(hours.value === "1" && minutes.value === "0", "Timer dialog initially selects one hour");
+        check(hours.tagName === "SELECT" && minutes.tagName === "SELECT" && hours.options.length === 25 && minutes.options.length === 60,
+            "Timer uses native touch selection for all hour/minute values without keyboard fields");
         check(document.activeElement === hours && controls.querySelector("#controls").inert,
             "Timer dialog receives focus and isolates underlying controls");
         hours.value = "24";
@@ -254,6 +316,10 @@ window.runDRUUiRegression = async function () {
         minutes.value = "0";
         minutes.dispatchEvent(new Event("input"));
         check(!resetTimer.disabled, "24 hours exactly is a valid timer reset duration");
+        minutes.value = "12";
+        hours.dispatchEvent(new Event("change"));
+        check(minutes.value === "0" && minutes.options[1].disabled,
+            "Selecting 24 hours restricts minutes to zero");
         push(4, { Fireplace: true }, { statusAvailable: false, offTimer: timerPayload("running") });
         check(!active.disabled && !timerDialog.querySelector('[data-timer-action="pause"]').disabled
             && !timerDialog.querySelector('[data-timer-action="delete"]').disabled && resetTimer.disabled,
@@ -263,6 +329,10 @@ window.runDRUUiRegression = async function () {
         push(4, { Fireplace: true }, { statusAvailable: false, offTimer: timerPayload("paused", { deadline: 0 }) });
         check(!active.checked && active.disabled && controls.querySelector(".timer-countdown").textContent.startsWith("Ⅱ"),
             "Paused countdown is retained and visually identified offline");
+        check(getComputedStyle(timerDialog).backgroundColor === "rgb(255, 255, 255)"
+            && getComputedStyle(timerDialog).color === "rgb(23, 23, 23)"
+            && getComputedStyle(controls.querySelector("footer")).backgroundColor === "rgb(255, 255, 255)",
+            "Dialog and footer keep explicit light colors independent of system dark theme");
         timerDialog.querySelector('[data-timer-action="delete"]').click();
         check(JSON.parse(actions.at(-1)[1]).action === "delete", "Delete requests removal only");
         push(4, { Fireplace: true }, { offTimer: timerPayload("idle") });
@@ -282,6 +352,27 @@ window.runDRUUiRegression = async function () {
         controls.querySelector(".timer-button").click();
         check(!controls.querySelector("#timerActive").disabled, "Active temperature automation allows timer with burner off");
         controls.querySelector("[data-timer-close]").click();
+        const originalTileStyle = controls.style.cssText;
+        try {
+            for (const [width, height] of [[280, 180], [320, 220], [390, 260]]) {
+                controls.style.width = `${width}px`;
+                controls.style.height = `${height}px`;
+                controls.style.fontSize = "18px";
+                controls.querySelector(".timer-button").click();
+                const dialog = controls.querySelector(".timer-dialog");
+                const tileRect = controls.getBoundingClientRect();
+                const dialogRect = dialog.getBoundingClientRect();
+                dialog.scrollTop = dialog.scrollHeight;
+                check(dialogRect.left >= tileRect.left && dialogRect.right <= tileRect.right
+                    && dialogRect.top >= tileRect.top && dialogRect.bottom <= tileRect.bottom
+                    && dialog.scrollWidth === dialog.clientWidth
+                    && dialog.querySelector(".timer-actions").getBoundingClientRect().bottom <= dialogRect.bottom,
+                    `Timer dialog fits ${width}x${height} tile with enlarged text and reachable actions`);
+                controls.querySelector("[data-timer-close]").click();
+            }
+        } finally {
+            controls.style.cssText = originalTileStyle;
+        }
         push(65, { Fireplace: false });
         check(controls.querySelector(".reset-button") && controls.querySelector(".fire-button").disabled, "Fault blocks start but preserves reset");
         const originalTimeout = window.setTimeout;
