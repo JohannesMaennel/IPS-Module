@@ -108,6 +108,46 @@ Bei einer Ablehnung die zugehoerigen Eintraege **Modbus TX**, **Modbus RX**
 und **Fehler** pruefen. Ohne diese Daten laesst sich nicht unterscheiden,
 ob Paketformat, Werte oder ein Geraetezustand die Ablehnung verursachen.
 
+## Austimer
+
+Die Stoppuhr rechts in der festen Fusszeile oeffnet einen Dialog innerhalb
+der Kachel. Stunden und Minuten erlauben 1 Minute bis 24 Stunden (24:00).
+Die erste Vorgabe ist eine Stunde, danach bleibt die letzte Dauer erhalten.
+Der Countdown steht mittig in der Fusszeile.
+
+- **Aktiv** startet den Timer bzw. setzt die pausierte Restzeit fort.
+  Eine geaenderte Dauer wird erst beim Start/Reset uebernommen.
+- **Aktiv aus / Stopp** pausiert; der Kamin bleibt an.
+- **Loeschen** entfernt den Countdown, behaelt die letzte Dauerwahl und
+  schaltet den Kamin nicht aus.
+- **Reset** startet sofort erneut mit der angezeigten Ausgangsdauer.
+  Keine Timeraktion schaltet den Kamin ein.
+- Pause/Loeschen sind auch ohne Modbus-Verbindung moeglich. Start/Reset
+  benoetigen eine Verbindung und einen fehlerfreien eingeschalteten Kamin
+  oder aktive Wave-/Temperaturautomatik.
+
+Der Timer laeuft serverseitig als IPS-Timer und speichert Zustand, Dauer,
+Restzeit und absoluten Ablaufzeitpunkt in Instanzattributen. Er funktioniert
+auch bei geschlossener Kachel. Aenderungen uebernehmen oder ein IPS-Neustart
+verlaengern ihn nicht. Ein beim Neustart ueberfaelliger Timer schaltet nach
+Erreichen des Kernelzustands READY ab.
+
+Bei Ablauf werden Wave und Temperaturautomatik beendet und der Hauptbrenner
+ausgeschaltet. Erst ein frischer Status mit Haupt-/Zweitbrenner und Wave aus
+sowie nicht aktiver Temperaturautomatik bestaetigt den Abschluss. Fehler
+werden im Log und in der Kachel angezeigt; der Auftrag bleibt ausstehend
+und wird alle 30 Sekunden wiederholt. Pause/Loeschen koennen weitere Versuche
+abbrechen; bereits gesendete Kaminbefehle werden dadurch nicht rueckgaengig
+gemacht. Licht und Boost werden nicht zusaetzlich ausgeschaltet.
+Ein manuelles, vollstaendig bestaetigtes Ausschalten beendet den Timer.
+Ein autonom ausgeschalteter Temperaturbrenner allein beendet ihn nicht.
+
+Der Dialog bleibt bei Statusupdates offen und erhaelt eingegebene Werte.
+Escape oder der Schliessenbutton schliessen ihn ohne den Timer zu aendern.
+In der lokalen Vorschau wird alles nur im Browser simuliert, einschliesslich
+einer optional fehlgeschlagenen Abschaltung. Kalender/Planung ist nicht Teil
+dieser Funktion.
+
 ## Regressionstests
 
 ### Symbolfamilie und Wave-Vorlagen
@@ -184,7 +224,8 @@ Oben lassen sich Aus, Betrieb, Wave, Temperaturregelung, Fault, gesperrter
 Reset, gesperrte Zuendung und Verbindungsverlust auswaehlen. Im Aus-Zustand
 drei Sekunden halten, loslassen, separat klicken: Nach zehn Sekunden wird
 der Brennerstatus simuliert. Die Checkboxen erlauben fehlgeschlagene Zuendung
-und einen weiterhin bestehenden Fehler nach Reset. Das Aktionsprotokoll
+und einen weiterhin bestehenden Fehler nach Reset sowie eine fehlgeschlagene
+Austimer-Abschaltung mit Wiederholungsversuchen. Das Aktionsprotokoll
 zeigt alle simulierten Aufrufe. Browser neu laden setzt die Vorschau zurueck.
 Die Simulation prueft Darstellung und Bedienung, nicht Modbus oder Hardware.
 
@@ -207,4 +248,6 @@ Die Browserregression in `tests/ui-regression.js` wird nach `UI/app.js`
 in einer Testseite mit `druData`, `controls`, `connectionStatus` und
 `temperature` geladen. `await window.runDRUUiRegression()` prueft den
 JSON-Nachrichtenweg, widerspruechliche Variablenwerte, Statusbits,
-Bedienfreigaben und das Verfallen veralteter Nachrichten.
+Bedienfreigaben und das Verfallen veralteter Nachrichten. Die Austimerpruefungen
+decken Dauergrenzen, Offline-Bedienung, Erhalt des Dialogentwurfs bei Heartbeats,
+Countdown, Pause/Loeschen/Reset sowie ausstehende Abschaltungen ab.

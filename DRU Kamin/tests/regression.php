@@ -9,6 +9,19 @@ $profiles = [];
 $modules = [];
 $logs = [];
 $nextId = 1000;
+define('IPS_KERNELMESSAGE', 10100);
+define('KR_READY', 10103);
+$kernelRunlevel = KR_READY;
+$semaphoreAvailable = true;
+$semaphoreDepth = 0;
+function IPS_GetKernelRunlevel(): int { return $GLOBALS['kernelRunlevel']; }
+function IPS_SemaphoreEnter(string $name, int $milliseconds): bool {
+    if (!$GLOBALS['semaphoreAvailable']) { return false; }
+    if ($GLOBALS['semaphoreDepth'] !== 0) { throw new RuntimeException('Nested action lock'); }
+    $GLOBALS['semaphoreDepth']++;
+    return true;
+}
+function IPS_SemaphoreLeave(string $name): void { $GLOBALS['semaphoreDepth']--; }
 
 function IPS_GetChildrenIDs(int $id): array { return array_keys($GLOBALS['objects'][$id] ?? []); }
 function IPS_GetObject(int $id): array {
@@ -60,6 +73,7 @@ class IPSModule
     public array $messages = [];
     public array $requests = [];
     public array $parentCalls = [];
+    public array $registeredMessages = [];
     public array $debug = [];
     public int $instanceStatus = 105;
 
@@ -83,6 +97,7 @@ class IPSModule
     protected function WriteAttributeInteger(string $name, int $value): void { $this->attributes[$name] = $value; }
     protected function WriteAttributeString(string $name, string $value): void { $this->attributes[$name] = $value; }
     protected function RegisterTimer(string $name, int $interval, string $script): void { $this->timers[$name] = $interval; }
+    protected function RegisterMessage(int $sender, int $message): void { $this->registeredMessages[] = [$sender, $message]; }
     protected function SetTimerInterval(string $name, int $interval): void { $this->timers[$name] = $interval; }
     protected function SetVisualizationType(int $type): void {}
     protected function SetStatus(int $status): void { $this->instanceStatus = $status; }
@@ -561,5 +576,180 @@ $previewPresets = file_get_contents(dirname(__DIR__) . '/UI/preview-presets.js')
 $previewJson = substr($previewPresets, strpos($previewPresets, '=') + 1);
 check(json_decode(trim($previewJson, " \n\r;"), true, 512, JSON_THROW_ON_ERROR) === $presets,
     'Offline preview generated presets match canonical JSON');
+
+$timer = new DRUKamin();
+$timer->Create();
+$timer->rawStatus = 4;
+$timer->ApplyChanges();
+$timerAction = static function (string $action, mixed $duration = 3600) use ($timer): void {
+    $timer->RequestAction('OffTimerAction', json_encode(['action' => $action, 'duration' => $duration], JSON_THROW_ON_ERROR));
+};
+check(payload($timer)['offTimer']['state'] === 'idle' && payload($timer)['offTimer']['duration'] === 3600,
+    'First timer selection defaults to one hour without automatic activation');
+check($timer->registeredMessages === [[0, IPS_KERNELMESSAGE]], 'Timer subscribes to kernel lifecycle');
+foreach ([0, 59, 61, 86460, '60', null] as $invalid) {
+    $timerAction('start', $invalid);
+    check($timer->attributes['OffTimerState'] === 'idle' && payload($timer)['offTimer']['error'] !== '',
+        'Invalid timer duration rejected explicitly: ' . json_encode($invalid));
+}
+$timerAction('start', 86400);
+check($timer->attributes['OffTimerDeadline'] >= time() + 86399
+    && $timer->timers['OffTimer'] <= 86400000, '24-hour duration accepted and scheduled server-side');
+$timerAction('delete');
+$timerAction('start', 60);
+check($timer->attributes['OffTimerState'] === 'running'
+    && $timer->attributes['OffTimerDuration'] === 60 && commands($timer) === [],
+    'One-minute start stores deadline without any ignition or other write');
+$deadline = $timer->attributes['OffTimerDeadline'];
+$timerAction('start', 3600);
+check($timer->attributes['OffTimerDeadline'] === $deadline, 'Duplicate start from another client does not restart running countdown');
+$timer->ApplyChanges();
+check($timer->attributes['OffTimerDeadline'] === $deadline && $timer->attributes['OffTimerState'] === 'running',
+    'ApplyChanges preserves timer deadline without extension');
+$timer->attributes['OffTimerDeadline'] = time() + 42;
+$timer->parentActive = false;
+$timerAction('pause', null);
+check($timer->attributes['OffTimerState'] === 'paused' && $timer->attributes['OffTimerRemaining'] <= 42
+    && $timer->attributes['OffTimerRemaining'] >= 41 && $timer->timers['OffTimer'] === 0 && commands($timer) === [],
+    'Offline pause retains rest time and does not turn off fireplace');
+$timer->ApplyChanges();
+check($timer->attributes['OffTimerState'] === 'paused' && $timer->timers['OffTimer'] === 0,
+    'Paused timer remains paused after ApplyChanges');
+$timerAction('reset', 60);
+check($timer->attributes['OffTimerState'] === 'paused' && payload($timer)['offTimer']['error'] !== '',
+    'Offline reset is explicitly rejected without losing pause');
+$timer->parentActive = true;
+$timerAction('start', 60);
+check($timer->attributes['OffTimerDeadline'] <= time() + 42 && $timer->attributes['OffTimerState'] === 'running',
+    'Resume uses stored rest time, not original duration');
+$timerAction('reset', 60);
+check($timer->attributes['OffTimerDeadline'] >= time() + 59 && $timer->attributes['OffTimerState'] === 'running',
+    'Reset immediately restarts original duration');
+$timerAction('delete');
+check($timer->attributes['OffTimerState'] === 'idle' && $timer->attributes['OffTimerDuration'] === 60
+    && commands($timer) === [], 'Delete retains selected duration without fireplace writes');
+$timer->rawStatus = 0;
+$timerAction('reset', 60);
+check($timer->attributes['OffTimerState'] === 'idle' && commands($timer) === [], 'Timer cannot turn on an off fireplace');
+
+foreach ([4, 516, 16388, 16384] as $initialStatus) {
+    $timer->rawStatus = $initialStatus;
+    $timerAction('reset', 60);
+    $timer->attributes['OffTimerDeadline'] = time() - 1;
+    $timer->statusQueue = [$initialStatus, 0, 0];
+    $timer->rawStatus = 0;
+    $timer->requests = [];
+    $timer->RequestAction('OffTimerTick', true);
+    $expected = ($initialStatus & 512) !== 0 ? [7, 3] : (((($initialStatus >> 13) & 3) === 2) ? [8, 3] : [3]);
+    check(commands($timer) === $expected && $timer->attributes['OffTimerState'] === 'idle'
+        && $timer->timers['OffTimer'] === 0, 'Expired timer confirms shutdown including automation: ' . $initialStatus);
+}
+$timer->rawStatus = 4;
+$timerAction('reset', 60);
+$timer->attributes['OffTimerDeadline'] = time() - 1;
+$savedAttributes = $timer->attributes;
+$restored = new DRUKamin();
+$restored->Create();
+$restored->attributes = $savedAttributes;
+$GLOBALS['kernelRunlevel'] = 10102;
+$restored->ApplyChanges();
+$restored->RequestAction('OffTimerTick', true);
+check($restored->timers['OffTimer'] === 30000 && commands($restored) === [],
+    'Overdue timer after restart waits for kernel READY without busy looping');
+$GLOBALS['kernelRunlevel'] = KR_READY;
+$restored->MessageSink(time(), 0, IPS_KERNELMESSAGE, [KR_READY]);
+check($restored->attributes['OffTimerState'] === 'idle' && commands($restored) === [3],
+    'Kernel READY immediately executes persisted overdue shutdown');
+
+$timer->parentActive = false;
+$timer->requests = [];
+$timer->RequestAction('OffTimerTick', true);
+check($timer->attributes['OffTimerState'] === 'stopping' && $timer->timers['OffTimer'] === 30000
+    && payload($timer)['offTimer']['error'] !== '', 'Disconnected expired timer reports failure and retries in 30 seconds');
+$timerAction('pause');
+check($timer->attributes['OffTimerState'] === 'paused' && $timer->timers['OffTimer'] === 0,
+    'Pause cancels pending retry even without parent connection');
+$timerAction('delete');
+$timer->parentActive = true;
+$timer->rawStatus = 516;
+$timerAction('reset', 60);
+$timer->attributes['OffTimerDeadline'] = time() - 1;
+$timer->writeFails = true;
+$timer->RequestAction('OffTimerTick', true);
+check($timer->attributes['OffTimerState'] === 'stopping' && commands($timer) === [7]
+    && $timer->timers['OffTimer'] === 30000, 'Failed Wave stop aborts dependent commands and keeps retry pending');
+$requests = count($timer->requests);
+$timer->RequestAction('OffTimerTick', true);
+check(count($timer->requests) === $requests, 'Early duplicate timer callback cannot bypass retry interval');
+$timer->writeFails = false;
+$timer->attributes['OffTimerNextAttempt'] = time() - 1;
+$timer->statusQueue = [516, 512, 512];
+$timer->rawStatus = 512;
+$timer->requests = [];
+$timer->RequestAction('OffTimerTick', true);
+check($timer->attributes['OffTimerState'] === 'stopping' && $timer->timers['OffTimer'] === 30000,
+    'Main OFF cannot confirm shutdown while Wave remains active');
+$timer->attributes['OffTimerNextAttempt'] = time() - 1;
+$timer->statusQueue = [16384, 16384, 16384];
+$timer->rawStatus = 16384;
+$timer->requests = [];
+$timer->RequestAction('OffTimerTick', true);
+check(commands($timer) === [8, 3] && $timer->attributes['OffTimerState'] === 'stopping',
+    'Main OFF cannot confirm shutdown while temperature automation remains active');
+$timer->attributes['OffTimerNextAttempt'] = time() - 1;
+$timer->statusQueue = [516, 8, 8];
+$timer->rawStatus = 8;
+$timer->requests = [];
+$timer->RequestAction('OffTimerTick', true);
+check(commands($timer) === [7, 3] && $timer->attributes['OffTimerState'] === 'stopping'
+    && str_contains(payload($timer)['offTimer']['error'], 'nicht bestätigt'),
+    'Main OFF alone is insufficient while second burner is still ON');
+$timer->attributes['OffTimerNextAttempt'] = time() - 1;
+$timer->rawStatus = 0;
+$timer->RequestAction('OffTimerTick', true);
+check($timer->attributes['OffTimerState'] === 'idle', 'Later confirmed shutdown completes retry');
+
+$timer->rawStatus = 16900;
+$timerAction('reset', 60);
+$timer->attributes['OffTimerDeadline'] = time() - 1;
+$timer->statusQueue = [16900, 384, 384];
+$timer->rawStatus = 384;
+$timer->requests = [];
+$timer->RequestAction('OffTimerTick', true);
+check(commands($timer) === [7, 8, 3] && $timer->attributes['OffTimerState'] === 'idle'
+    && (payload($timer)['statusRegister'] & 384) === 384,
+    'Shutdown stops both automations in sequence without additional light/boost commands');
+$timer->rawStatus = 4;
+$timer->properties['EnableFireplace'] = false;
+$timerAction('start', 60);
+check($timer->attributes['OffTimerState'] === 'idle' && str_contains(payload($timer)['offTimer']['error'], 'deaktiviert'),
+    'Disabled fireplace configuration cannot activate timer');
+$timer->properties['EnableFireplace'] = true;
+$timerAction('reset', 60);
+$timer->attributes['OffTimerDeadline'] = time() - 1;
+$timer->parentThrows = true;
+$timer->RequestAction('OffTimerTick', true);
+check($timer->attributes['OffTimerState'] === 'stopping' && $timer->timers['OffTimer'] === 30000
+    && $GLOBALS['semaphoreDepth'] === 0, 'Transport exception keeps retry pending and releases action lock');
+$timer->parentThrows = false;
+$timerAction('delete');
+$requests = count($timer->requests);
+$timer->RequestAction('OffTimerTick', true);
+check(count($timer->requests) === $requests, 'Late callback after delete cannot send shutdown commands');
+$timer->rawStatus = 16384;
+$timerAction('reset', 60);
+$timer->RequestAction('PollStatus', true);
+check($timer->attributes['OffTimerState'] === 'running', 'Autonomous temperature-mode burner OFF does not cancel timer');
+$timer->statusQueue = [16384, 0, 0];
+$timer->rawStatus = 0;
+$timer->RequestAction('Fireplace', false);
+check($timer->attributes['OffTimerState'] === 'idle', 'Fully confirmed manual shutdown clears countdown');
+check($GLOBALS['semaphoreDepth'] === 0, 'All action paths release instance semaphore');
+$GLOBALS['semaphoreAvailable'] = false;
+$requests = count($timer->requests);
+$timer->RequestAction('OffTimerTick', true);
+check(count($timer->requests) === $requests && str_contains(end($GLOBALS['logs'])[1], 'andere Kaminaktion'),
+    'Contended action lock reports failure instead of overlapping Modbus commands');
+$GLOBALS['semaphoreAvailable'] = true;
 
 echo 'All DRU regression checks passed.' . PHP_EOL;

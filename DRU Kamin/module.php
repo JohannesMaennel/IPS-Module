@@ -34,6 +34,12 @@ class DRUKamin extends IPSModule
         $this->RegisterAttributeInteger('WaveInterval', 10);
         $this->RegisterAttributeInteger('WaveUpdatedAt', 0);
         $this->RegisterAttributeInteger('WaveSyncAttemptAt', 0);
+        $this->RegisterAttributeInteger('OffTimerDuration', 3600);
+        $this->RegisterAttributeInteger('OffTimerDeadline', 0);
+        $this->RegisterAttributeInteger('OffTimerRemaining', 0);
+        $this->RegisterAttributeInteger('OffTimerNextAttempt', 0);
+        $this->RegisterAttributeString('OffTimerState', 'idle');
+        $this->RegisterAttributeString('OffTimerError', '');
         $this->RegisterAttributeString(
             'WavePattern',
             json_encode(array_fill(0, self::WAVE_STAGE_COUNT, 50), JSON_THROW_ON_ERROR)
@@ -46,6 +52,8 @@ class DRUKamin extends IPSModule
         );
 
         $this->SetVisualizationType(1);
+        $this->RegisterTimer('OffTimer', 0, 'IPS_RequestAction($_IPS["TARGET"], "OffTimerTick", true);');
+        $this->RegisterMessage(0, IPS_KERNELMESSAGE);
     }
 
     public function ApplyChanges()
@@ -59,12 +67,52 @@ class DRUKamin extends IPSModule
         $this->WriteAttributeInteger('WaveUpdatedAt', 0);
         $this->WriteAttributeInteger('WaveSyncAttemptAt', 0);
         $this->SetTimerInterval('PollStatus', 5000);
-        $this->RefreshStatus();
+        $this->ScheduleOffTimer();
+        $this->RequestAction('PollStatus', true);
+    }
+
+    public function MessageSink($TimeStamp, $SenderID, $Message, $Data)
+    {
+        if ($Message === IPS_KERNELMESSAGE && ($Data[0] ?? 0) === KR_READY) {
+            $this->RequestAction('OffTimerTick', true);
+        }
     }
 
     public function RequestAction($Ident, $Value)
     {
+        $lock = 'DRUKamin.Actions.' . $this->InstanceID;
+        if (!IPS_SemaphoreEnter($lock, 15000)) {
+            $this->LogError(str_starts_with($Ident, 'OffTimer') ? 'Austimer' : 'Aktion ' . $Ident,
+                'Eine andere Kaminaktion läuft; bitte erneut versuchen.');
+            $this->UpdateVisualization();
+            return;
+        }
+        try {
+            $this->HandleAction($Ident, $Value);
+        } finally {
+            IPS_SemaphoreLeave($lock);
+        }
+    }
+
+    private function HandleAction($Ident, $Value): void
+    {
         $this->actionFailed = false;
+
+        if ($Ident === 'OffTimerAction' || $Ident === 'OffTimerTick') {
+            try {
+                if ($Ident === 'OffTimerTick') {
+                    $this->ProcessOffTimer();
+                } else {
+                    $this->ChangeOffTimer((string) $Value);
+                }
+            } catch (Throwable $error) {
+                $this->LogError('Austimer', $error);
+            } finally {
+                $this->ScheduleOffTimer();
+                $this->UpdateVisualization();
+            }
+            return;
+        }
 
         if ($Ident === 'PollStatus') {
             $this->RefreshStatus();
@@ -86,6 +134,10 @@ class DRUKamin extends IPSModule
                     $this->RequireFeature('EnableFireplace', 'Kamin');
                     if (!$this->actionFailed) {
                         $this->SetMainBurner((bool) $Value);
+                        if (!(bool) $Value && !$this->actionFailed
+                            && $this->ReadAttributeString('OffTimerState') !== 'idle' && $this->ConfirmOffTimerShutdown()) {
+                            $this->ClearOffTimer();
+                        }
                     }
                     break;
                 case 'SecondBurner':
@@ -289,6 +341,14 @@ class DRUKamin extends IPSModule
             'statusRegister' => $this->ReadAttributeInteger('StatusRegister'),
             'resetPending' => $this->ReadAttributeInteger('ResetPendingUntil') > time(),
             'canSetFlameHeight' => $this->CanSetFlameHeight(),
+            'offTimer' => [
+                'state' => $this->ReadAttributeString('OffTimerState'),
+                'duration' => $this->ReadAttributeInteger('OffTimerDuration'),
+                'deadline' => $this->ReadAttributeInteger('OffTimerDeadline'),
+                'remaining' => $this->ReadAttributeInteger('OffTimerRemaining'),
+                'serverTime' => time(),
+                'error' => $this->ReadAttributeString('OffTimerError')
+            ],
             'features' => [
                 'temperatureControl' => $this->ReadPropertyBoolean('EnableTemperatureControl'),
                 'wave' => $this->ReadPropertyBoolean('EnableWave')
@@ -324,6 +384,138 @@ class DRUKamin extends IPSModule
             $this->LogError('Statusabfrage fehlgeschlagen', $error);
         }
         $this->UpdateVisualization();
+    }
+
+    private function ChangeOffTimer(string $json): void
+    {
+        $input = json_decode($json, true);
+        if (!is_array($input) || !isset($input['action']) || !is_string($input['action'])) {
+            $this->LogError('Austimer', 'Ungültiger Timerauftrag.');
+            return;
+        }
+        $action = $input['action'];
+        if ($action === 'delete') {
+            $this->ClearOffTimer();
+            return;
+        }
+        if ($action === 'pause') {
+            $state = $this->ReadAttributeString('OffTimerState');
+            if ($state === 'running' || $state === 'stopping') {
+                $this->WriteAttributeInteger('OffTimerRemaining', max(0, $this->ReadAttributeInteger('OffTimerDeadline') - time()));
+                $this->WriteAttributeInteger('OffTimerDeadline', 0);
+                $this->WriteAttributeString('OffTimerState', 'paused');
+                $this->WriteAttributeString('OffTimerError', '');
+            }
+            return;
+        }
+        if ($action !== 'start' && $action !== 'reset') {
+            $this->LogError('Austimer', 'Unbekannte Timeraktion: ' . $action);
+            return;
+        }
+        $duration = $input['duration'] ?? null;
+        if (!is_int($duration) || $duration < 60 || $duration > 86400 || $duration % 60 !== 0) {
+            $this->LogError('Austimer', 'Dauer muss zwischen 1 Minute und 24 Stunden in ganzen Minuten liegen.');
+            return;
+        }
+        if (!$this->ReadPropertyBoolean('EnableFireplace')) {
+            $this->LogError('Austimer', 'Die Kaminfunktion ist deaktiviert.');
+            return;
+        }
+        if (!$this->HasActiveParent()) {
+            $this->LogError('Austimer', 'Start/Reset benötigt eine aktive Modbus-Verbindung.');
+            return;
+        }
+        $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
+        if (($status & 1) !== 0 || (($status & (4 | 512)) === 0 && (($status >> 13) & 3) !== 2)) {
+            $this->LogError('Austimer', 'Start/Reset benötigt einen fehlerfreien eingeschalteten Kamin oder aktive Automatik.');
+            return;
+        }
+        $state = $this->ReadAttributeString('OffTimerState');
+        if ($action === 'start' && $state === 'running') {
+            return;
+        }
+        $remaining = $action === 'start' && $state === 'paused'
+            && $duration === $this->ReadAttributeInteger('OffTimerDuration')
+            ? $this->ReadAttributeInteger('OffTimerRemaining') : $duration;
+        $this->WriteAttributeInteger('OffTimerDuration', $duration);
+        $this->WriteAttributeInteger('OffTimerRemaining', $remaining);
+        $this->WriteAttributeInteger('OffTimerDeadline', time() + $remaining);
+        $this->WriteAttributeInteger('OffTimerNextAttempt', 0);
+        $this->WriteAttributeString('OffTimerError', '');
+        $this->WriteAttributeString('OffTimerState', 'running');
+    }
+
+    private function ClearOffTimer(): void
+    {
+        $this->WriteAttributeString('OffTimerState', 'idle');
+        $this->WriteAttributeString('OffTimerError', '');
+        $this->WriteAttributeInteger('OffTimerDeadline', 0);
+        $this->WriteAttributeInteger('OffTimerRemaining', 0);
+        $this->WriteAttributeInteger('OffTimerNextAttempt', 0);
+        $this->SetTimerInterval('OffTimer', 0);
+    }
+
+    private function ScheduleOffTimer(): void
+    {
+        $state = $this->ReadAttributeString('OffTimerState');
+        $next = $state === 'running' ? $this->ReadAttributeInteger('OffTimerDeadline')
+            : ($state === 'stopping' ? $this->ReadAttributeInteger('OffTimerNextAttempt') : 0);
+        $interval = $next > 0 ? max(1, ($next - time()) * 1000) : 0;
+        if ($interval > 0 && IPS_GetKernelRunlevel() !== KR_READY) {
+            $interval = 30000;
+        }
+        $this->SetTimerInterval('OffTimer', $interval);
+    }
+
+    private function ConfirmOffTimerShutdown(): bool
+    {
+        $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return false;
+        }
+        if (($status & (4 | 8 | 512)) !== 0 || (($status >> 13) & 3) === 2) {
+            $this->LogError('Austimer', 'Brenner oder Automatik noch aktiv; Abschaltung nicht bestätigt.');
+            return false;
+        }
+        return true;
+    }
+
+    private function ProcessOffTimer(): void
+    {
+        $state = $this->ReadAttributeString('OffTimerState');
+        if (($state !== 'running' && $state !== 'stopping')
+            || ($state === 'running' && time() < $this->ReadAttributeInteger('OffTimerDeadline'))
+            || ($state === 'stopping' && time() < $this->ReadAttributeInteger('OffTimerNextAttempt'))) {
+            return;
+        }
+        if (IPS_GetKernelRunlevel() !== KR_READY) {
+            $this->SetTimerInterval('OffTimer', 30000);
+            return;
+        }
+        $this->WriteAttributeString('OffTimerState', 'stopping');
+        $this->WriteAttributeInteger('OffTimerRemaining', 0);
+        $this->WriteAttributeInteger('OffTimerNextAttempt', time() + 30);
+        $this->WriteAttributeString('OffTimerError', '');
+        try {
+            if (!$this->HasActiveParent()) {
+                $this->LogError('Austimer', 'Verbindung fehlt; erneuter Abschaltversuch in 30 Sekunden.');
+            } else {
+                $this->SetMainBurner(false);
+                if (!$this->actionFailed && $this->ConfirmOffTimerShutdown()) {
+                    $this->ClearOffTimer();
+                    $this->SendDebug('Austimer', 'Brenner und Automatik bestätigt ausgeschaltet.', 0);
+                }
+            }
+        } catch (Throwable $error) {
+            $this->LogError('Austimer-Abschaltung', $error);
+        }
+        if ($this->ReadAttributeString('OffTimerState') === 'stopping') {
+            $this->WriteAttributeInteger('OffTimerNextAttempt', time() + 30);
+        }
+        $this->RefreshStatus();
     }
 
     private function RegisterProfiles(): void
@@ -1242,6 +1434,9 @@ class DRUKamin extends IPSModule
         $this->actionFailed = true;
         $detail = $error instanceof Throwable ? $error->getMessage() : (string) $error;
         $message = $context . ': ' . $detail;
+        if ($this->ReadAttributeString('OffTimerState') === 'stopping' || str_starts_with($context, 'Austimer')) {
+            $this->WriteAttributeString('OffTimerError', $message);
+        }
         $this->SendDebug('Fehler', $message, 0);
         IPS_LogMessage('DRU Kamin', $message);
     }

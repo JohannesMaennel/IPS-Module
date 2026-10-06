@@ -19,6 +19,7 @@ window.runDRUUiRegression = async function () {
             statusValidForMs: 15000,
             canSetFlameHeight: (statusRegister & 4) !== 0,
             waveSettings: { available: true, interval: 10, stages: Array(20).fill(50) },
+            offTimer: { state: "idle", duration: 3600, remaining: 0, deadline: 0, serverTime: Math.floor(Date.now() / 1000), error: "" },
             ...overrides
         }));
     };
@@ -212,6 +213,75 @@ window.runDRUUiRegression = async function () {
         check(getComputedStyle(controls.querySelector(".range-control")).textAlign === "center",
             "Manual power label and value are centered");
         check(controls.querySelector("footer #connectionStatus"), "Connection status is in tile footer");
+
+        const timerPayload = (state, extra = {}) => ({ state, duration: 3600, remaining: 120,
+            deadline: Math.floor(Date.now() / 1000) + 120, serverTime: Math.floor(Date.now() / 1000), error: "", ...extra });
+        controls.querySelector(".timer-button").click();
+        const timerDialog = controls.querySelector(".timer-dialog");
+        const hours = timerDialog.querySelector("#timerHours");
+        const minutes = timerDialog.querySelector("#timerMinutes");
+        const active = timerDialog.querySelector("#timerActive");
+        const resetTimer = timerDialog.querySelector('[data-timer-action="reset"]');
+        check(hours.value === "1" && minutes.value === "0", "Timer dialog initially selects one hour");
+        check(document.activeElement === hours && controls.querySelector("#controls").inert,
+            "Timer dialog receives focus and isolates underlying controls");
+        hours.value = "24";
+        minutes.value = "1";
+        minutes.dispatchEvent(new Event("input"));
+        check(active.disabled && resetTimer.disabled, "Timer cannot exceed 24 hours");
+        hours.value = "0";
+        minutes.value = "0";
+        minutes.dispatchEvent(new Event("input"));
+        check(active.disabled && resetTimer.disabled, "Zero timer duration cannot start");
+        minutes.value = "1";
+        minutes.dispatchEvent(new Event("input"));
+        check(!active.disabled && !resetTimer.disabled, "One minute is a valid timer duration");
+        const beforeTimer = actions.length;
+        active.checked = true;
+        active.dispatchEvent(new Event("change"));
+        const startAction = JSON.parse(actions.at(-1)[1]);
+        check(actions.length === beforeTimer + 1 && actions.at(-1)[0] === "OffTimerAction"
+            && startAction.action === "start" && startAction.duration === 60,
+            "Activation sends explicit duration to server, not fireplace ignition");
+        resetTimer.click();
+        check(actions.length === beforeTimer + 1, "Pending timer action prevents duplicate clicks");
+        push(4, { Fireplace: true, FlameHeight: 60 }, { offTimer: timerPayload("running") });
+        check(controls.querySelector(".timer-dialog") === timerDialog && hours.value === "0" && minutes.value === "1",
+            "Timer heartbeat preserves open dialog and duration draft");
+        check(active.checked && controls.querySelector(".timer-countdown").textContent.endsWith("02:00"),
+            "Running countdown uses server deadline rather than draft duration");
+        hours.value = "24";
+        minutes.value = "0";
+        minutes.dispatchEvent(new Event("input"));
+        check(!resetTimer.disabled, "24 hours exactly is a valid timer reset duration");
+        push(4, { Fireplace: true }, { statusAvailable: false, offTimer: timerPayload("running") });
+        check(!active.disabled && !timerDialog.querySelector('[data-timer-action="pause"]').disabled
+            && !timerDialog.querySelector('[data-timer-action="delete"]').disabled && resetTimer.disabled,
+            "Offline timer allows pause/delete but not reset");
+        timerDialog.querySelector('[data-timer-action="pause"]').click();
+        check(JSON.parse(actions.at(-1)[1]).action === "pause", "Stopp requests pause only");
+        push(4, { Fireplace: true }, { statusAvailable: false, offTimer: timerPayload("paused", { deadline: 0 }) });
+        check(!active.checked && active.disabled && controls.querySelector(".timer-countdown").textContent.startsWith("Ⅱ"),
+            "Paused countdown is retained and visually identified offline");
+        timerDialog.querySelector('[data-timer-action="delete"]').click();
+        check(JSON.parse(actions.at(-1)[1]).action === "delete", "Delete requests removal only");
+        push(4, { Fireplace: true }, { offTimer: timerPayload("idle") });
+        check(controls.querySelector(".timer-countdown").textContent === "", "Confirmed timer deletion removes countdown");
+        resetTimer.click();
+        check(JSON.parse(actions.at(-1)[1]).action === "reset" && JSON.parse(actions.at(-1)[1]).duration === 86400,
+            "Reset explicitly restarts selected duration immediately");
+        push(4, { Fireplace: true }, { offTimer: timerPayload("stopping", { error: "Abschaltung fehlgeschlagen" }) });
+        check(controls.querySelector(".timer-countdown").textContent === "Abschaltung…"
+            && controls.querySelector("#connectionStatus").textContent === "Abschaltung fehlgeschlagen",
+            "Failed shutdown stays pending and visibly reports error");
+        timerDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        check(!controls.querySelector(".timer-dialog") && !controls.querySelector("#controls").inert
+            && document.activeElement === controls.querySelector(".timer-button"),
+            "Escape closes dialog without changing timer and restores focus");
+        push(16384, { Fireplace: false }, { offTimer: timerPayload("idle") });
+        controls.querySelector(".timer-button").click();
+        check(!controls.querySelector("#timerActive").disabled, "Active temperature automation allows timer with burner off");
+        controls.querySelector("[data-timer-close]").click();
         push(65, { Fireplace: false });
         check(controls.querySelector(".reset-button") && controls.querySelector(".fire-button").disabled, "Fault blocks start but preserves reset");
         const originalTimeout = window.setTimeout;

@@ -31,6 +31,26 @@
     let suppressStartClick = false;
     let waveDraft;
     let waveEditing = false;
+    let offTimer = { state: "idle", duration: 3600, deadline: 0, remaining: 0, error: "" };
+    let timerClockOffset = 0;
+    let timerPending = false;
+    let timerPendingTimeout;
+    let timerDialog;
+    const footer = statusLabel.parentElement;
+    footer.classList.add("timer-footer");
+    const countdown = document.createElement("span");
+    countdown.className = "timer-countdown";
+    countdown.setAttribute("aria-label", "Austimer Restzeit");
+    const timerButton = document.createElement("button");
+    timerButton.type = "button";
+    timerButton.className = "control timer-button";
+    timerButton.title = "Austimer";
+    timerButton.setAttribute("aria-label", "Austimer öffnen");
+    timerButton.setAttribute("aria-haspopup", "dialog");
+    timerButton.append(symbolSvg("timer"));
+    timerButton.addEventListener("click", openTimerDialog);
+    footer.append(countdown, timerButton);
+    window.setInterval(updateTimerDisplay, 1000);
     const presetElement = document.getElementById("wavePresets");
     const wavePresets = presetElement ? JSON.parse(presetElement.textContent) : window.druWavePresets || [];
     if (!Array.isArray(wavePresets) || wavePresets.some(preset =>
@@ -75,6 +95,7 @@
             boost: ["M16 14C9 4 22 1 24 8c1 4-5 7-8 6Z", "M18 17c12-2 12 11 5 12-4 0-6-7-5-12Z", "M14 18C8 28 0 18 4 13c3-3 9 1 10 5Z"],
             edit: ["M7 21 22 6l4 4-15 15-6 2Z", "M19 9l4 4"],
             save: ["M5 5h19l3 3v19H5Z", "M10 5v9h12V5", "M10 27v-9h12v9"],
+            timer: ["M12 3h8M16 3v4", "M25 7l3 3", "M16 10v8l4 2", "M27 18a11 11 0 1 1-22 0 11 11 0 0 1 22 0"],
             reset: ["M25 12a11 11 0 1 0 1 10", "M25 4v8h-8", "M16 11v7M16 23v.1"]
         };
         (shapes[name] || []).forEach(shape => {
@@ -199,6 +220,12 @@
         }
         values = data.values || {};
         features = data.features || {};
+        if (data.offTimer) {
+            offTimer = data.offTimer;
+            timerClockOffset = Number(offTimer.serverTime) * 1000 - Date.now();
+            timerPending = false;
+            window.clearTimeout(timerPendingTimeout);
+        }
         const nextWaveSettings = data.waveSettings || waveSettings;
         if (JSON.stringify(nextWaveSettings) !== JSON.stringify(waveSettings)) {
             waveDraft = undefined;
@@ -243,6 +270,11 @@
         } else {
             statusLabel.textContent = "Verbunden";
         }
+        if (offTimer.error) {
+            statusLabel.textContent = offTimer.error;
+            statusLabel.classList.add("error");
+        }
+        updateTimerDisplay();
 
         window.clearTimeout(statusExpiryTimer);
         if (statusAvailable) {
@@ -252,6 +284,7 @@
                 renderedState = "";
                 statusLabel.textContent = "Kein aktueller Modbus-Status – Steuerung gesperrt";
                 statusLabel.classList.add("error");
+                updateTimerDisplay();
                 render();
             }, Math.max(0, Number(data.statusValidForMs ?? 15000)));
         }
@@ -263,6 +296,131 @@
     }
 
     window.handleMessage = applyData;
+
+    function timerRemaining() {
+        return offTimer.state === "running"
+            ? Math.max(0, Math.ceil(Number(offTimer.deadline) - (Date.now() + timerClockOffset) / 1000))
+            : Math.max(0, Number(offTimer.remaining) || 0);
+    }
+
+    function updateTimerDisplay() {
+        const remaining = timerRemaining();
+        const time = [Math.floor(remaining / 3600), Math.floor(remaining / 60) % 60, remaining % 60]
+            .map(part => String(part).padStart(2, "0")).join(":");
+        countdown.textContent = offTimer.state === "idle" ? "" : offTimer.state === "stopping"
+            ? "Abschaltung…" : `${offTimer.state === "paused" ? "Ⅱ " : ""}${time}`;
+        countdown.title = offTimer.state === "paused" ? "Austimer pausiert" : "Austimer Restzeit";
+        countdown.classList.toggle("error", Boolean(offTimer.error));
+        timerButton.setAttribute("aria-pressed", String(offTimer.state !== "idle"));
+        if (!timerDialog) {
+            return;
+        }
+        const active = timerDialog.querySelector("#timerActive");
+        active.checked = offTimer.state === "running" || offTimer.state === "stopping";
+        const canRun = statusAvailable && !fault && (mainBurnerOn || waveActive || temperatureActive)
+            && values.Fireplace !== undefined;
+        const valid = timerDuration() !== null;
+        active.disabled = timerPending || (!active.checked && (!canRun || !valid));
+        timerDialog.querySelector('[data-timer-action="reset"]').disabled = timerPending || !canRun || !valid;
+        timerDialog.querySelector('[data-timer-action="pause"]').disabled = timerPending || !active.checked;
+        timerDialog.querySelector('[data-timer-action="delete"]').disabled = timerPending || offTimer.state === "idle";
+        timerDialog.querySelector(".timer-feedback").textContent = timerPending ? "Warte auf Timer-Rückmeldung…"
+            : offTimer.error || (offTimer.state === "paused" ? `Pausiert: ${time}` : offTimer.state === "stopping"
+                ? "Abschaltung wird bestätigt; bei Fehler Wiederholung alle 30 Sekunden."
+                : offTimer.state === "running" ? `Restzeit: ${time}` : "Kein Austimer aktiv.");
+    }
+
+    function timerDuration() {
+        const hours = timerDialog.querySelector("#timerHours");
+        const minutes = timerDialog.querySelector("#timerMinutes");
+        if (!hours.checkValidity() || !minutes.checkValidity() || hours.value === "" || minutes.value === "") {
+            return null;
+        }
+        const duration = Number(hours.value) * 3600 + Number(minutes.value) * 60;
+        return Number.isInteger(duration) && duration >= 60 && duration <= 86400 ? duration : null;
+    }
+
+    function timerAction(action) {
+        if (timerPending) {
+            return;
+        }
+        const duration = timerDuration();
+        if ((action === "start" || action === "reset") && duration === null) {
+            timerDialog.querySelector(".timer-feedback").textContent = "Bitte 1 Minute bis 24 Stunden wählen.";
+            return;
+        }
+        timerPending = true;
+        updateTimerDisplay();
+        timerPendingTimeout = window.setTimeout(() => {
+            timerPending = false;
+            updateTimerDisplay();
+            statusLabel.textContent = "Keine Timer-Rückmeldung – bitte Status prüfen.";
+            statusLabel.classList.add("error");
+        }, 15000);
+        sendAction("OffTimerAction", JSON.stringify({ action, duration }));
+    }
+
+    function closeTimerDialog() {
+        if (!timerDialog) {
+            return;
+        }
+        timerDialog.remove();
+        timerDialog = undefined;
+        [statusBar, controls, footer].forEach(element => { element.inert = false; });
+        timerButton.focus();
+    }
+
+    function openTimerDialog() {
+        if (timerDialog) {
+            return;
+        }
+        timerDialog = document.createElement("div");
+        timerDialog.className = "timer-overlay";
+        timerDialog.innerHTML = `<section class="timer-dialog" role="dialog" aria-modal="true" aria-labelledby="timerTitle">
+            <div class="timer-heading"><h2 id="timerTitle">Austimer</h2>
+                <button type="button" class="control" data-timer-close aria-label="Austimer schließen">×</button></div>
+            <div class="timer-duration">
+                <label>Stunden<input id="timerHours" type="number" min="0" max="24" step="1" required></label>
+                <label>Minuten<input id="timerMinutes" type="number" min="0" max="59" step="1" required></label>
+            </div>
+            <label class="timer-switch">Aktiv<input id="timerActive" type="checkbox" role="switch"></label>
+            <p class="timer-feedback" role="status"></p>
+            <div class="timer-actions">
+                <button type="button" class="control" data-timer-action="pause">Stopp</button>
+                <button type="button" class="control" data-timer-action="delete">Löschen</button>
+                <button type="button" class="control" data-timer-action="reset">Reset</button>
+            </div>
+        </section>`;
+        const duration = Number(offTimer.duration) || 3600;
+        timerDialog.querySelector("#timerHours").value = Math.floor(duration / 3600);
+        timerDialog.querySelector("#timerMinutes").value = Math.floor(duration / 60) % 60;
+        timerDialog.querySelector("[data-timer-close]").addEventListener("click", closeTimerDialog);
+        timerDialog.querySelector("#timerActive").addEventListener("change", event => {
+            timerAction(event.target.checked ? "start" : "pause");
+        });
+        timerDialog.querySelectorAll("[data-timer-action]").forEach(button => {
+            button.addEventListener("click", () => timerAction(button.dataset.timerAction));
+        });
+        timerDialog.querySelectorAll('input[type="number"]').forEach(input => {
+            input.addEventListener("input", updateTimerDisplay);
+        });
+        timerDialog.addEventListener("keydown", event => {
+            if (event.key === "Escape") {
+                closeTimerDialog();
+            } else if (event.key === "Tab") {
+                const elements = [...timerDialog.querySelectorAll("button:not(:disabled), input:not(:disabled)")];
+                const index = elements.indexOf(document.activeElement);
+                if ((event.shiftKey && index <= 0) || (!event.shiftKey && index === elements.length - 1)) {
+                    event.preventDefault();
+                    elements[event.shiftKey ? elements.length - 1 : 0].focus();
+                }
+            }
+        });
+        document.querySelector(".dru").append(timerDialog);
+        [statusBar, controls, footer].forEach(element => { element.inert = true; });
+        updateTimerDisplay();
+        timerDialog.querySelector("#timerHours").focus();
+    }
 
     function render() {
         cancelHold();

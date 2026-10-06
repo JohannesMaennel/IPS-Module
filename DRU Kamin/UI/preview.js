@@ -20,6 +20,44 @@
     let wave = { available: true, interval: 10, stages: Array(20).fill(50) };
     let pendingTimer;
     let pendingAction = "";
+    let offTimer = { state: "idle", duration: 3600, deadline: 0, remaining: 0, error: "" };
+    let nextOffAttempt = 0;
+
+    function clearOffTimer() {
+        offTimer = { ...offTimer, state: "idle", deadline: 0, remaining: 0, error: "" };
+        nextOffAttempt = 0;
+    }
+
+    function changeOffTimer(value) {
+        const input = JSON.parse(value);
+        if (input.action === "delete") {
+            clearOffTimer();
+        } else if (input.action === "pause") {
+            if (offTimer.state === "running" || offTimer.state === "stopping") {
+                offTimer.remaining = Math.max(0, offTimer.deadline - Math.floor(Date.now() / 1000));
+                offTimer.deadline = 0;
+                offTimer.state = "paused";
+                offTimer.error = "";
+            }
+        } else if (input.action === "start" || input.action === "reset") {
+            const duration = input.duration;
+            if (!Number.isInteger(duration) || duration < 60 || duration > 86400 || duration % 60 !== 0) {
+                offTimer.error = "Ungültige Timerdauer.";
+            } else if (!available || (status & 1) !== 0
+                || ((status & (4 | 512)) === 0 && ((status >> 13) & 3) !== 2)) {
+                offTimer.error = "Start/Reset benötigt einen verbundenen, eingeschalteten Kamin.";
+            } else if (input.action !== "start" || offTimer.state !== "running") {
+                const remaining = input.action === "start" && offTimer.state === "paused"
+                    && duration === offTimer.duration ? offTimer.remaining : duration;
+                offTimer = { state: "running", duration, remaining,
+                    deadline: Math.floor(Date.now() / 1000) + remaining, error: "" };
+                nextOffAttempt = 0;
+            }
+        } else {
+            offTimer.error = "Unbekannte Timeraktion.";
+        }
+        push();
+    }
 
     function note(message) {
         log.textContent = `${new Date().toLocaleTimeString()} ${message}\n${log.textContent}`.slice(0, 4000);
@@ -44,6 +82,7 @@
             statusAvailable: available,
             statusValidForMs: available ? 15000 : 0,
             resetPending,
+            offTimer: { ...offTimer, serverTime: Math.floor(Date.now() / 1000) },
             canSetFlameHeight: available && (status & 4) !== 0 && (status & 513) === 0 && ((status >> 13) & 3) !== 2,
             waveSettings: wave
         };
@@ -76,6 +115,10 @@
 
     window.requestAction = (ident, value) => {
         note(`SIMULATION ${ident}: ${String(value)}`);
+        if (ident === "OffTimerAction") {
+            changeOffTimer(value);
+            return;
+        }
         if (!available) {
             note("Abgelehnt: keine Verbindung.");
             return;
@@ -102,6 +145,7 @@
                     pendingAction = "";
                     status &= ~(4 | 8 | 512);
                     status = (status & ~(3 << 13)) | (1 << 13);
+                    clearOffTimer();
                 }
                 break;
             case "ResetFireplace":
@@ -160,4 +204,23 @@
 
     document.getElementById("druData").textContent = JSON.stringify(payload());
     window.setInterval(push, 5000);
+    window.setInterval(() => {
+        const now = Math.floor(Date.now() / 1000);
+        if ((offTimer.state === "running" && now >= offTimer.deadline)
+            || (offTimer.state === "stopping" && now >= nextOffAttempt)) {
+            if (!available || document.getElementById("offTimerFails").checked) {
+                offTimer.state = "stopping";
+                offTimer.remaining = 0;
+                offTimer.error = "Austimer: Abschaltung fehlgeschlagen; Wiederholung in 30 Sekunden.";
+                nextOffAttempt = now + 30;
+                note(offTimer.error);
+            } else {
+                status &= ~(4 | 8 | 512);
+                status = (status & ~(3 << 13)) | (1 << 13);
+                clearOffTimer();
+                note("Austimer: Brenner und Automatik lokal ausgeschaltet.");
+            }
+            push();
+        }
+    }, 1000);
 })();
