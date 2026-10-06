@@ -30,6 +30,7 @@ class DRUKamin extends IPSModule
         $this->RegisterAttributeInteger('LastIgnitionAt', 0);
         $this->RegisterAttributeInteger('StatusRegister', 0);
         $this->RegisterAttributeInteger('StatusUpdatedAt', 0);
+        $this->RegisterAttributeInteger('ResetPendingUntil', 0);
         $this->RegisterAttributeInteger('WaveInterval', 10);
         $this->RegisterAttributeInteger('WaveUpdatedAt', 0);
         $this->RegisterAttributeInteger('WaveSyncAttemptAt', 0);
@@ -78,6 +79,9 @@ class DRUKamin extends IPSModule
 
         try {
             switch ($Ident) {
+                case 'ResetFireplace':
+                    $this->ResetFireplace();
+                    break;
                 case 'Fireplace':
                     $this->RequireFeature('EnableFireplace', 'Kamin');
                     if (!$this->actionFailed) {
@@ -133,6 +137,12 @@ class DRUKamin extends IPSModule
                     $this->RequireFeature('EnableWave', 'Wave');
                     if (!$this->actionFailed) {
                         $this->SaveWaveSettings((string) $Value);
+                    }
+                    break;
+                case 'ReloadWaveSettings':
+                    $this->RequireFeature('EnableWave', 'Wave');
+                    if (!$this->actionFailed) {
+                        $this->SynchronizeWaveSettings();
                     }
                     break;
                 default:
@@ -205,15 +215,45 @@ class DRUKamin extends IPSModule
         $html = file_get_contents(__DIR__ . '/UI/main.html');
         $css = file_get_contents(__DIR__ . '/UI/main.css');
         $js = file_get_contents(__DIR__ . '/UI/app.js');
+        $presets = file_get_contents(__DIR__ . '/UI/wave-presets.json');
 
-        if (!is_string($html) || !is_string($css) || !is_string($js)) {
+        if (!is_string($html) || !is_string($css) || !is_string($js) || !is_string($presets)) {
             $this->LogError('Visualisierung', 'Die HTML-SDK-Dateien im UI-Ordner konnten nicht geladen werden.');
+            return '';
+        }
+        try {
+            $presetData = json_decode($presets, true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($presetData) || count($presetData) !== 3) {
+                $this->LogError('Visualisierung', 'Die Wave-Vorlagen müssen drei Profile enthalten.');
+                return '';
+            }
+            $ids = [];
+            foreach ($presetData as $preset) {
+                if (!is_array($preset) || !isset($preset['id'], $preset['name'], $preset['interval'], $preset['stages'])
+                    || !is_string($preset['id']) || !is_string($preset['name'])
+                    || in_array($preset['id'], $ids, true)
+                    || !is_int($preset['interval']) || $preset['interval'] < 5 || $preset['interval'] > 60
+                    || !is_array($preset['stages']) || count($preset['stages']) !== self::WAVE_STAGE_COUNT) {
+                    $this->LogError('Wave-Vorlagen', 'Eine Wave-Vorlage hat ein ungültiges Format.');
+                    return '';
+                }
+                foreach ($preset['stages'] as $stage) {
+                    if (!is_int($stage) || $stage < 0 || $stage > 100) {
+                        $this->LogError('Wave-Vorlagen', 'Vorlagenstufen müssen Ganzzahlen zwischen 0 und 100 sein.');
+                        return '';
+                    }
+                }
+                $ids[] = $preset['id'];
+            }
+            $presets = json_encode($presetData, JSON_THROW_ON_ERROR | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+        } catch (Throwable $error) {
+            $this->LogError('Wave-Vorlagen', $error);
             return '';
         }
 
         return str_replace(
-            ['{{CSS}}', '{{JS}}', '{{DATA}}'],
-            [$css, $js, json_encode($this->GetVisualizationData(), JSON_THROW_ON_ERROR | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT)],
+            ['{{CSS}}', '{{JS}}', '{{DATA}}', '{{PRESETS}}'],
+            [$css, $js, json_encode($this->GetVisualizationData(), JSON_THROW_ON_ERROR | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT), $presets],
             $html
         );
     }
@@ -247,6 +287,7 @@ class DRUKamin extends IPSModule
                 && $this->HasActiveParent(),
             'statusValidForMs' => max(0, 15 - (time() - $this->ReadAttributeInteger('StatusUpdatedAt'))) * 1000,
             'statusRegister' => $this->ReadAttributeInteger('StatusRegister'),
+            'resetPending' => $this->ReadAttributeInteger('ResetPendingUntil') > time(),
             'canSetFlameHeight' => $this->CanSetFlameHeight(),
             'features' => [
                 'temperatureControl' => $this->ReadPropertyBoolean('EnableTemperatureControl'),
@@ -436,6 +477,15 @@ class DRUKamin extends IPSModule
         $previousStatus = $this->ReadAttributeInteger('StatusRegister');
         $this->WriteAttributeInteger('StatusRegister', $status);
         $this->WriteAttributeInteger('StatusUpdatedAt', time());
+        $resetPendingUntil = $this->ReadAttributeInteger('ResetPendingUntil');
+        if ($resetPendingUntil > 0 && (($status & 1) === 0 || time() >= $resetPendingUntil)) {
+            $this->WriteAttributeInteger('ResetPendingUntil', 0);
+            if (($status & 1) !== 0) {
+                $this->LogError('Kamin-Reset', 'Nach 20 Sekunden ist das Fehlerbit weiterhin gesetzt; erneuter Reset nur bei Gerätefreigabe.');
+            } else {
+                $this->SendDebug('Kamin-Reset', 'Fehlerbit gelöscht; Reset bestätigt.', 0);
+            }
+        }
         $this->RecordMainBurnerState(($status & (1 << 2)) !== 0);
         $this->SetBooleanValueIfPresent('FireplaceFault', ($status & 1) !== 0);
         $this->SetBooleanValueIfPresent('SecondBurner', ($status & (1 << 3)) !== 0);
@@ -497,10 +547,42 @@ class DRUKamin extends IPSModule
         $wasOn = (bool) GetValue($variableId);
         if ($isOn && !$wasOn) {
             $this->WriteAttributeInteger('LastIgnitionAt', time());
+            $flameId = $this->FindVariableId('FlameHeight');
+            if ($flameId !== 0) {
+                SetValue($flameId, 100);
+            }
         } elseif (!$isOn) {
             $this->WriteAttributeInteger('LastIgnitionAt', 0);
         }
         SetValue($variableId, $isOn);
+    }
+
+    private function ResetFireplace(): void
+    {
+        if ($this->ReadAttributeInteger('ResetPendingUntil') > time()) {
+            $this->LogError('Kamin-Reset', 'Ein Reset wartet bereits auf Rückmeldung.');
+            return;
+        }
+        $status = $this->ReadRegister(self::STATUS_REGISTER);
+        if ($this->actionFailed) {
+            return;
+        }
+        if (($status & 1) === 0) {
+            $this->LogError('Kamin-Reset', 'Kein Kaminfehler vorhanden; Reset wurde nicht gesendet.');
+            return;
+        }
+        if (($status & (1 << 6)) === 0) {
+            $this->LogError('Kamin-Reset', 'Das Gerät erlaubt derzeit keinen Reset durch den Benutzer.');
+            return;
+        }
+
+        $this->WriteAttributeInteger('ResetPendingUntil', time() + 20);
+        $this->UpdateVisualization();
+        if (!$this->WriteRegister(self::COMMAND_REGISTER, 1000)) {
+            $this->WriteAttributeInteger('ResetPendingUntil', 0);
+            return;
+        }
+        $this->SendDebug('Kamin-Reset', 'Kommando 1000 bestätigt; warte zyklisch auf gelöschtes Fehlerbit.', 0);
     }
 
     private function SetMainBurner(bool $turnOn): void

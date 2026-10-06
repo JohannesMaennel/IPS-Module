@@ -26,6 +26,19 @@ der Status nach maximal 15 Sekunden.
 
 ## Bedienung
 
+- Der HTML-Startbutton ist eine graue SVG-Flamme mit Schloss und Haltering.
+  Zum Entriegeln drei Sekunden halten (Touch/Maus oder Leertaste/Enter),
+  loslassen und danach separat antippen. Ein kurzer Druck startet nichts.
+  Fokus-/Sichtbarkeitsverlust, Fehler oder ungueltiger Status sperren erneut.
+  Die Freigabe betrifft die UI; bestehende IPS-Variablenaktionen bleiben
+  unveraendert.
+- Beim Start faerbt sich die Flamme ueber etwa zehn Sekunden von unten nach
+  oben. Ohne bestaetigtes Hauptbrennerbit bleibt die Fuellung unter 100 Prozent.
+  Erst Bit 2 zeigt die kleine farbige **AUS**-Flamme oben links und die
+  zentrale Regelung. Ohne Bestaetigung endet die UI-Wartephase nach
+  30 Sekunden wieder verriegelt; das ist keine automatische Abschaltung.
+  Licht und Boost bleiben unabhaengig bedienbar. Im autonomen Temperaturmodus
+  bleiben Modus/Solltemperatur auch bei ausgeschaltetem Brenner erreichbar.
 - Hauptbrenner starten: Kommando 101 an Register 40200; erst Statusbit 2
   bestaetigt den eingeschalteten Hauptbrenner. Kommando 100 wird nicht verwendet.
 - Hauptbrenner ausschalten: Kommando 3. Die gekoppelte Reaktion des
@@ -34,6 +47,15 @@ der Status nach maximal 15 Sekunden.
 - Zweitbrenner, Licht und Boost-Luefter werden nur dann als Variablen und
   UI-Aktionen angeboten, wenn die jeweilige Installationsoption aktiviert ist.
 - Licht und Boost-Luefter benoetigen keine Hauptbrenner-Zuendung.
+- Bei Fault erscheint **Kamin zuruecksetzen**. Er ist nur mit aktuellem Status
+  und gesetzter Benutzer-Resetfreigabe bedienbar. Register 40203 verwendet
+  Bit 0 fuer Fault und Bit 6 fuer die Freigabe (Positionen 1 und 7).
+  Der Backend-Aufruf `ResetFireplace` prueft den Status erneut und sendet
+  Kommando 1000 an 40200. Waehrend der Rueckmeldung sind weitere Resets gesperrt.
+  Polling entfernt den Button erst bei geloeschtem Fault. Bleibt Fault nach
+  20 Sekunden bestehen, wird dies protokolliert und der Button entsprechend
+  der aktuellen Freigabe wieder bedienbar. Kein automatischer Reset oder
+  automatisches erneutes Zuenden.
 
 Fehler und Zuendschritte stehen im Symcon-Log. Der Instanz-Debug zeigt
 Statusrueckmeldungen und fuer FC6-Schreibbefehle auch TX-Daten und die
@@ -87,6 +109,75 @@ und **Fehler** pruefen. Ohne diese Daten laesst sich nicht unterscheiden,
 ob Paketformat, Werte oder ein Geraetezustand die Ablehnung verursachen.
 
 ## Regressionstests
+
+### Symbolfamilie und Wave-Vorlagen
+
+Die rahmenlosen SVG-Buttons verwenden dieselbe Flammenform. Im Betrieb steht
+die Hauptbrenner-Flamme ohne AUS-Text und der optionale Zweitbrenner als
+Mini-Flamme mit der Ziffer 2 neben Licht/Boost in der oberen Statusleiste.
+Aktive Brenner nutzen denselben dezenten Hintergrund wie andere Schalter.
+Licht nutzt eine Gluehbirne, Boost einen Ventilator,
+Reset einen Ruecksetz-Pfeil mit Fehlerindikator. Die obere Statuszeile enthaelt
+Isttemperatur, Licht/Boost als Symbolschalter und eine einzelne Modusauswahl
+in festen Bereichen: Schalter links, Temperaturen mittig, Modus rechts.
+Bei kleinen Kacheln stehen die Temperaturen zentriert in einer eigenen,
+hoehenreservierten Kopfzeilen-Reihe. Die Sollanzeige verschiebt keine Buttons.
+Die Modusauswahl erscheint
+als Dropdown mit Hand-, Thermometer- und Wellensymbol. Bei bestaetigter
+Temperaturregelung zeigt sie zusaetzlich Aktivsymbol und Solltemperatur,
+auch wenn die Regelung den Brenner ausschaltet. Status-/Fehlermeldungen stehen
+in der Fusszeile. Leistung und Solltemperatur sind horizontal mit
+kleiner/grosser Flamme. Schalter behalten ARIA-Beschriftungen und Tooltips.
+Die Leistung ist die letzte Vorgabe, kein gemessener Istwert; bei erkannter
+neuer Zuendung wird sie auf 100 Prozent gesetzt, ohne Zusatz-Schreibbefehl.
+
+Das Layout ist fuer kleine IPS-Kacheln verdichtet: moderne Systemschrift
+(unter Windows Segoe UI), kurze Abstaende und kleinere Symbole.
+Schriften werden nicht extern geladen. Schaltflaechen behalten mindestens
+44 Pixel Hoehe; der Drei-Sekunden-Halteablauf bleibt unveraendert.
+Beide horizontalen Regler zeigen Beschriftung und Wert mittig.
+Die Wave-Ansicht zeigt Profilwahl und Stift ohne zusaetzliche sichtbare Labels.
+Der Stift klappt Intervall und 20 vertikale Regler mit Abstand zur Profilinfo
+unterhalb auf. Die Diskette steht neben dem Stift und ist nur bei geoeffnetem
+Bearbeitungsmodus und gueltigem Geraetestatus bedienbar.
+Profilwechsel laden JSON-Vorlagen bzw. den aktuellen
+Geraetestand; unveraenderte Heartbeats erhalten den Entwurf. Nur die Diskette
+sendet einen Schreibauftrag und klappt die Details wieder zu. Das Zuklappen
+bestaetigt keinen Schreiberfolg; Fehler werden weiterhin in der Fusszeile
+gemeldet, und der Backend-Readback zeigt den tatsaechlichen Geraetestand.
+Es wird kein Popup verwendet:
+Das HTML-SDK dokumentiert keine native Popup-Oeffnungsfunktion, und das
+Popup-Modul ist laut Symcon-Dokumentation nicht in der Kachelvisualisierung
+verfuegbar. Es werden keine Popup-Variablen oder Navigationsskripte angelegt.
+
+`UI/wave-presets.json` enthaelt drei Profile mit je zwei Wellen ueber 20 Stufen:
+50-100 Prozent / 10 Sekunden, 20-60 Prozent / 20 Sekunden und
+10-100 Prozent / 10 Sekunden. Die Auswahl aendert nur den Editor.
+Erst **Wave-Muster speichern** schreibt auf das Geraet. Initial wird immer
+das gelesene Geraeteprofil gezeigt. Die Auswahl **Aktuelles Profil (Kamin)**
+verwirft den Entwurf und fordert einen neuen Readback an; ein Fehler ergibt kein Ersatzprofil.
+Ein abweichender Geraetestand ersetzt den Entwurf; unveraenderte Heartbeats nicht.
+Die quantisierte Umsetzung auf 1-15 Geraetestufen bleibt unveraendert.
+
+Die Vorschau nutzt die aus JSON generierte `UI/preview-presets.js`, damit sie
+auch per Doppelklick ohne Fetch/Webserver funktioniert. Nach Aenderungen an
+der JSON-Datei einmal `php ".\DRU Kamin\tests\build-preview-presets.php"`
+ausfuehren. Das produktive Tile liest die JSON-Datei direkt.
+
+### Lokale UI-Vorschau ohne Kamin
+
+`UI/preview.html` per Doppelklick im Browser oeffnen. Kein Webserver, PHP oder
+IP-Symcon erforderlich. Die Seite laedt die produktiven `app.js` und `main.css`,
+ersetzt `requestAction` aber ausschliesslich durch lokale Simulationen in
+`preview.js`. Die Vorschauseite wird nicht vom produktiven Tile geladen.
+
+Oben lassen sich Aus, Betrieb, Wave, Temperaturregelung, Fault, gesperrter
+Reset, gesperrte Zuendung und Verbindungsverlust auswaehlen. Im Aus-Zustand
+drei Sekunden halten, loslassen, separat klicken: Nach zehn Sekunden wird
+der Brennerstatus simuliert. Die Checkboxen erlauben fehlgeschlagene Zuendung
+und einen weiterhin bestehenden Fehler nach Reset. Das Aktionsprotokoll
+zeigt alle simulierten Aufrufe. Browser neu laden setzt die Vorschau zurueck.
+Die Simulation prueft Darstellung und Bedienung, nicht Modbus oder Hardware.
 
 Ohne laufenden Symcon-Kernel:
 

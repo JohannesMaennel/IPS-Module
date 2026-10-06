@@ -179,6 +179,19 @@ check(payload($module)['values']['Fireplace'] === false, 'Initial off status is 
 $module->rawStatus = 12;
 $module->RequestAction('PollStatus', true);
 check(payload($module)['values']['Fireplace'] === true, 'Cyclic poll detects external ignition');
+check(payload($module)['values']['FlameHeight'] === 100, 'Confirmed new ignition initializes manual command to maximum');
+$flameId = 0;
+foreach ($GLOBALS['objects'][$module->InstanceID] as $id => $object) {
+    if ($object['ObjectIdent'] === 'FlameHeight') {
+        $flameId = $id;
+    }
+}
+SetValue($flameId, 40);
+$writesBeforePoll = count(array_filter($module->requests, static fn (array $request): bool => $request['Function'] === 6));
+$module->RequestAction('PollStatus', true);
+check(payload($module)['values']['FlameHeight'] === 40, 'Repeated ON poll preserves last manual command');
+check(count(array_filter($module->requests, static fn (array $request): bool => $request['Function'] === 6)) === $writesBeforePoll,
+    'Ignition initialization does not write an additional register');
 $module->rawStatus = 15360;
 $module->RequestAction('PollStatus', true);
 check(payload($module)['values']['Fireplace'] === false && (payload($module)['statusRegister'] & 4) === 0, 'Observed status 15360 reports main burner OFF');
@@ -484,5 +497,69 @@ $syncModule->registerValues[40420] = 35;
 $syncModule->RequestAction('PollStatus', true);
 check(payload($syncModule)['waveSettings']['available'] && payload($syncModule)['waveSettings']['interval'] === 35,
     'Reconnect reloads device Wave settings');
+
+$resetModule = new DRUKamin();
+$resetModule->Create();
+$resetModule->ApplyChanges();
+foreach ([0, 64, 1, 129] as $status) {
+    $resetModule->rawStatus = $status;
+    $resetModule->requests = [];
+    $resetModule->RequestAction('ResetFireplace', true);
+    check(commands($resetModule) === [], 'Reset requires Fault and bit 6, not boost bit 7: ' . $status);
+}
+$resetModule->rawStatus = 65;
+$resetModule->requests = [];
+$resetModule->RequestAction('ResetFireplace', true);
+check(commands($resetModule) === [1000] && payload($resetModule)['resetPending']
+    && payload($resetModule)['values']['FireplaceFault'], 'Allowed reset sends 1000 without clearing Fault optimistically');
+$resetModule->requests = [];
+$resetModule->RequestAction('ResetFireplace', true);
+check(commands($resetModule) === [] && payload($resetModule)['resetPending'], 'Duplicate reset is blocked pending confirmation');
+$resetModule->rawStatus = 0;
+$resetModule->RequestAction('PollStatus', true);
+check(!payload($resetModule)['resetPending'] && !payload($resetModule)['values']['FireplaceFault'], 'Confirmed Fault clearance ends reset wait');
+$resetModule->rawStatus = 65;
+$resetModule->RequestAction('ResetFireplace', true);
+$resetModule->attributes['ResetPendingUntil'] = time() - 1;
+$resetModule->RequestAction('PollStatus', true);
+check(!payload($resetModule)['resetPending'] && payload($resetModule)['values']['FireplaceFault']
+    && str_contains($logs[count($logs) - 1][1], 'Fehlerbit weiterhin'), 'Reset timeout preserves Fault and logs failed reset');
+$resetModule->requests = [];
+$resetModule->RequestAction('ResetFireplace', true);
+check(commands($resetModule) === [1000], 'User can retry reset after timeout with current permission');
+$resetModule->attributes['ResetPendingUntil'] = 0;
+$resetModule->writeFails = true;
+$resetModule->RequestAction('ResetFireplace', true);
+check(!payload($resetModule)['resetPending'] && payload($resetModule)['values']['FireplaceFault'], 'Failed reset write unlocks retry without hiding Fault');
+$resetModule->writeFails = false;
+$resetModule->readFails = true;
+$resetModule->requests = [];
+$resetModule->RequestAction('ResetFireplace', true);
+check(commands($resetModule) === [] && !payload($resetModule)['statusAvailable'], 'Failed fresh status read prevents reset');
+$resetModule->readFails = false;
+$resetModule->connection = 0;
+$resetModule->requests = [];
+$resetModule->RequestAction('ResetFireplace', true);
+check(commands($resetModule) === [], 'Disconnected parent prevents reset');
+
+$syncModule->registerValues[40420] = 40;
+$syncModule->requests = [];
+$syncModule->RequestAction('ReloadWaveSettings', true);
+check(payload($syncModule)['waveSettings']['interval'] === 40
+    && !array_filter($syncModule->requests, static fn (array $request): bool => $request['Function'] !== 3),
+    'Reload current Wave profile only reads registers and synchronizes IPS data');
+$presets = json_decode(file_get_contents(dirname(__DIR__) . '/UI/wave-presets.json'), true, 512, JSON_THROW_ON_ERROR);
+foreach (array_map(null, $presets, [50, 20, 10], [100, 60, 100], [10, 20, 10]) as [$preset, $minimum, $maximum, $interval]) {
+    check(count($preset['stages']) === 20 && min($preset['stages']) === $minimum
+        && max($preset['stages']) === $maximum && $preset['interval'] === $interval
+        && array_slice($preset['stages'], 0, 10) === array_slice($preset['stages'], 10, 10),
+        'JSON preset has two cycles with exact range and interval: ' . $preset['id']);
+}
+check(str_contains($syncModule->GetVisualizationTile(), '"id":"even"')
+    && !str_contains($syncModule->GetVisualizationTile(), '{{PRESETS}}'), 'Production tile embeds Wave preset JSON without external fetch');
+$previewPresets = file_get_contents(dirname(__DIR__) . '/UI/preview-presets.js');
+$previewJson = substr($previewPresets, strpos($previewPresets, '=') + 1);
+check(json_decode(trim($previewJson, " \n\r;"), true, 512, JSON_THROW_ON_ERROR) === $presets,
+    'Offline preview generated presets match canonical JSON');
 
 echo 'All DRU regression checks passed.' . PHP_EOL;

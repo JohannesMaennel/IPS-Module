@@ -2,19 +2,19 @@
 <html lang="de">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>{{CSS}}</style>
 </head>
 <body>
     <main class="dru">
-        <header>
-            <div>
-                <p id="connectionStatus" role="status"></p>
-            </div>
+        <header class="status-bar">
             <span id="temperature" class="temperature"></span>
         </header>
         <section id="controls" aria-label="Kaminsteuerung"></section>
+        <footer><p id="connectionStatus" role="status"></p></footer>
     </main>
     <script id="druData" type="application/json">{{DATA}}</script>
+    <script id="wavePresets" type="application/json">{{PRESETS}}</script>
     <script>{{JS}}</script>
 </body>
 </html>

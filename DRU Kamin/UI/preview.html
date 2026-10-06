@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DRU Kamin – lokale Vorschau</title>
+    <link rel="stylesheet" href="main.css">
+    <style>
+        .preview-panel { max-width: 760px; margin: 0 auto 24px; padding: 16px; border: 2px dashed #f59e0b; border-radius: 12px; }
+        .preview-panel h1 { margin-bottom: 10px; }
+        .preview-options { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+        .preview-panel select { font: inherit; padding: 8px; }
+        #previewLog { max-height: 120px; overflow: auto; white-space: pre-wrap; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <aside class="preview-panel">
+        <h1>Vorschau – kein echter Kamin verbunden</h1>
+        <p>Alle Aktionen bleiben lokal im Browser. Es werden keine Modbus-, Netzwerk- oder IPS-Aufrufe ausgeführt.</p>
+        <div class="preview-options">
+            <label for="scenario">Gerätestatus</label>
+            <select id="scenario">
+                <option value="off">Aus / verriegelt</option>
+                <option value="on">Brenner an / manuell</option>
+                <option value="wave">Wave aktiv</option>
+                <option value="temperature">Temperaturregelung aktiv</option>
+                <option value="temperature-off">Temperaturregelung / Brenner aus</option>
+                <option value="fault">Fehler / Reset erlaubt</option>
+                <option value="fault-locked">Fehler / Reset gesperrt</option>
+                <option value="ignition-locked">Zündung nicht freigegeben</option>
+                <option value="offline">Keine Verbindung</option>
+            </select>
+            <label><input id="ignitionFails" type="checkbox"> Zündung schlägt fehl</label>
+            <label><input id="resetFails" type="checkbox"> Fehler bleibt nach Reset</label>
+        </div>
+        <pre id="previewLog" aria-label="Simulierte Aktionen"></pre>
+    </aside>
+    <main class="dru">
+        <header class="status-bar">
+            <span id="temperature" class="temperature"></span>
+        </header>
+        <section id="controls" aria-label="Kaminsteuerung"></section>
+        <footer><p id="connectionStatus" role="status"></p></footer>
+    </main>
+    <script id="druData" type="application/json">{"values":{"Fireplace":false},"features":{},"statusRegister":8192,"statusAvailable":true,"statusValidForMs":15000}</script>
+    <script src="preview-presets.js"></script>
+    <script src="preview.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
