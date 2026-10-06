@@ -127,8 +127,13 @@ frei. Die produktive Darstellung fuellt die Kachelhoehe; Kopf- und Fusszeile
 bleiben sichtbar, nur der Mittelteil scrollt. Die Offline-Vorschau simuliert
 dafuer eine begrenzte Kachelhoehe (260-500 Pixel je nach Fensterhoehe).
 Die Modusauswahl erscheint
-als Dropdown mit Hand-, Thermometer- und Wellensymbol. Bei bestaetigter
-Temperaturregelung zeigt sie zusaetzlich Aktivsymbol und Solltemperatur,
+als Dropdown mit Hand-, Thermometer- und Wellensymbol.
+Das ausgewaehlte Modussymbol ist ein einfarbiges SVG innerhalb des Dropdowns,
+kein plattformabhaengiges Emoji. Der Dropdown-Pfeil steht links; die native
+Optionsliste zeigt Hand, Thermometer und Welle neben den Modusnamen.
+Unicode-Symbole verwenden die Textdarstellungs-Vorgabe; die Darstellung
+innerhalb der nativen Optionsliste bleibt vom mobilen Betriebssystem abhaengig.
+Bei bestaetigter Temperaturregelung zeigt sie zusaetzlich Aktivsymbol und Solltemperatur,
 auch wenn die Regelung den Brenner ausschaltet. Status-/Fehlermeldungen stehen
 in der Fusszeile. Leistung und Solltemperatur sind horizontal mit
 kleiner/grosser Flamme. Schalter behalten ARIA-Beschriftungen und Tooltips.

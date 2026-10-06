@@ -394,7 +394,13 @@
         modeSelect.className = "mode-select";
         modeSelect.setAttribute("aria-label", "Betriebsart");
         modeSelect.disabled = !statusAvailable || (!mainBurnerOn && !temperatureActive && !waveActive);
-        modeSection.appendChild(modeSelect);
+        const modeIcon = symbolSvg(operationMode);
+        modeIcon.classList.add("mode-icon");
+        const modeLabel = document.createElement("span");
+        modeLabel.className = "mode-label";
+        modeLabel.setAttribute("aria-hidden", "true");
+        modeLabel.textContent = { manual: "Manuell", temperature: "Temp.", wave: "Wave" }[operationMode];
+        modeSection.append(modeIcon, modeLabel, modeSelect);
 
         [
             ["manual", "Manuell", true],

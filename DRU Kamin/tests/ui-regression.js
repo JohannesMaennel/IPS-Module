@@ -53,7 +53,11 @@ window.runDRUUiRegression = async function () {
             && !controls.querySelector(".fire-toolbar .fire-label")
             && controls.querySelector(".fire-toolbar .fire-button").getAttribute("aria-pressed") === "true",
             "Only bit 2 confirms active icon-only OFF flame in status bar");
-        check(!controls.querySelector(".mode-section > svg"), "Mode dropdown has no duplicate adjacent status icon");
+        check(controls.querySelector(".mode-icon")
+            && controls.querySelector('.mode-select option[value="manual"]').textContent === "\u270B\uFE0E Manuell"
+            && controls.querySelector('.mode-select option[value="temperature"]').textContent === "\u{1F321}\uFE0E Temp."
+            && controls.querySelector('.mode-select option[value="wave"]').textContent === "≋ Wave",
+            "Mode dropdown retains SVG and icons in all native options");
         controls.querySelector(".fire-button").click();
         check(actions.at(-1)[0] === "Fireplace" && actions.at(-1)[1] === false, "Small running flame sends OFF without hold");
         check(controls.querySelector('header [data-ident="Light"]').getAttribute("aria-label") === "Kaminlicht: Aus", "Light uses its own status bit in top status bar");
