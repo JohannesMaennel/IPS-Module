@@ -122,6 +122,10 @@ Isttemperatur, Licht/Boost als Symbolschalter und eine einzelne Modusauswahl
 in festen Bereichen: Schalter links, Temperaturen mittig, Modus rechts.
 Bei kleinen Kacheln stehen die Temperaturen zentriert in einer eigenen,
 hoehenreservierten Kopfzeilen-Reihe. Die Sollanzeige verschiebt keine Buttons.
+Rechts neben dem Modus-Dropdown bleiben 32 Pixel fuer die IPS-Maximieren-Aktion
+frei. Die produktive Darstellung fuellt die Kachelhoehe; Kopf- und Fusszeile
+bleiben sichtbar, nur der Mittelteil scrollt. Die Offline-Vorschau simuliert
+dafuer eine begrenzte Kachelhoehe (260-500 Pixel je nach Fensterhoehe).
 Die Modusauswahl erscheint
 als Dropdown mit Hand-, Thermometer- und Wellensymbol. Bei bestaetigter
 Temperaturregelung zeigt sie zusaetzlich Aktivsymbol und Solltemperatur,
